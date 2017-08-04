@@ -7,3 +7,4 @@ coverage.xml
 /Context.sublime-menu
 /Main.sublime-menu
 _build/
+/Context.sublime-menu-hidden

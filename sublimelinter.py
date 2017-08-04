@@ -12,6 +12,7 @@
 
 import os
 import re
+import shutil
 
 import sublime
 import sublime_plugin
@@ -22,6 +23,13 @@ from .lint.queue import queue
 from .lint import persist, util
 from string import Template
 
+CURRENT_PATH = os.path.dirname( os.path.realpath( __file__ ) )
+
+
+class HideMenuOnActivation(sublime_plugin.EventListener):
+
+    def on_activated_async(self, view):
+        disable_linter_context_menu()
 
 def plugin_loaded():
     """The ST3 entry point for plugins."""
@@ -48,6 +56,31 @@ def plugin_loaded():
     if window:
         plugin.on_activated(window.active_view())
 
+    disable_linter_context_menu()
+
+def disable_linter_context_menu():
+    """
+        Disable the linter Context Menu, if not on a linter view.
+
+        Allow to hide .sublime-menu folders
+        https://github.com/SublimeTextIssues/Core/issues/1859
+    """
+    origin  = os.path.join( CURRENT_PATH, 'Context.sublime-menu' )
+    destine = os.path.join( CURRENT_PATH, 'Context.sublime-menu-hidden' )
+
+    try:
+        if is_current_view_linted( sublime.active_window().active_view() ):
+            shutil.move( destine, origin )
+
+        else:
+            shutil.move( origin, destine )
+
+    except IOError:
+        pass
+
+def is_current_view_linted(view):
+    # print( "persist.view_linters: " + str( persist.view_linters ) )
+    return view.id() in persist.view_linters
 
 class SublimeLinter(sublime_plugin.EventListener):
     """The main ST3 plugin class."""
