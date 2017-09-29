@@ -36,7 +36,7 @@
         "tooltip_fontsize": "1rem",
         "tooltip_theme": "Packages/SublimeLinter/tooltip-themes/Default/Default.tooltip-theme",
         "tooltip_theme_excludes": [],
-        "tooltips": false,
+        "tooltips": true,
         "warning_color": "DDB700",
         "wrap_find": true
     }
