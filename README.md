@@ -2,29 +2,55 @@ SublimeLinter
 =============
 
 [![Build Status](https://img.shields.io/travis/SublimeLinter/SublimeLinter3/master.svg)](https://travis-ci.org/SublimeLinter/SublimeLinter3)
-[![codecov.io](https://img.shields.io/codecov/c/github/SublimeLinter/SublimeLinter3/master.svg)](http://codecov.io/github/SublimeLinter/SublimeLinter3?branch=master)
 
-**To those upgrading from SublimeLinter v1.7:**
+**Linters not included**
 
-#### LINTERS ARE *NOT* INCLUDED WITH SUBLIMELINTER 3. ####
+SublimeLinter is a framework for interactive code linting in [Sublime Text 3](http://sublimetext.com/3).
 
-**Please read the [installation documentation](http://sublimelinter.readthedocs.org/en/latest/installation.html)!**
+[Documentation on readthedocs.org](https://sublimelinter.readthedocs.org).
 
-## About SublimeLinter
-A framework for interactive code linting in the [Sublime Text 3](http://sublimetext.com/3) editor. The Sublime Text 2 version is no longer being supported; you can find it [here](https://github.com/SublimeLinter/SublimeLinter).
 
-**Documentation:** See it on [readthedocs.org](https://sublimelinter.readthedocs.org).
+## SublimeLinter 4 beta
 
-**Support & Bugs:** Please use the [issue tracker](https://github.com/SublimeLinter/SublimeLinter3/issues) to report installation and configuration problems. If you think you have found a bug, please search for it on the deprecated [SublimeLinter google group](https://groups.google.com/forum/#!forum/sublimelinter) first, and if it can't be found you can report it on the [issue tracker](https://github.com/SublimeLinter/SublimeLinter3/issues). Please be sure to put your OS, SublimeLinter version, and **ENTIRE** debug console output in the issue. If your issue is specific to a particular linter, please report it on that linter's repository instead.
+We're making big improvements to how SublimeLinter works. You can read more about it [here](https://github.com/SublimeLinter/SublimeLinter3/blob/next/messages/4.0.0-rc.1.txt) and track our progress in [PR #666](https://github.com/SublimeLinter/SublimeLinter3/pull/666). PRs with contributions are welcome on the `next` branch.
 
-**Contributing:** If you would like to submit a fix or enhancement for SublimeLinter, please read the [contributing guidelines](https://sublimelinter.readthedocs.org/en/latest/contributing.html) first.
+Participate in the beta right now by editing your Package Control preferences and adding SublimeLinter to the "install_prereleases" key:  
+```json
+"install_prereleases":
+[
+  "SublimeLinter"
+]
+```
 
-## Share the love!
-Hundreds of hours have been spent writing and documenting SublimeLinter to make it the best it can be — easy to use, easy to configure, easy to update, easy to extend. If you use SublimeLinter and feel it is making your coding life better and easier, please consider making a donation to help fund development and support. Thank you!
+*Disclaimer: there will be bugs and we will make changes that will break your workflow, but it's pretty awesome otherwise*
 
-[![Donate Paypal](http://grotewold.me/assets/button-paypal.png)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=FK7SKD3X8N7BU)
-[![Donate Gratipay](http://grotewold.me/assets/button-gratipay.png)](https://gratipay.com/sublimelinter/)
-[![Donate Bitcoin](http://grotewold.me/assets/button-bitcoin.png)](https://www.coinbase.com/groteworld)
+
+## Key Bindings
+
+SublimeLinter comes with several pre-defined keyboard shortcuts. You can customize these via the Package Settings menu\*. Read more about keybindings in [the unofficial documentation](http://docs.sublimetext.info/en/latest/customization/key_bindings.html)
+
+| Command         | Linux & Windows  | MacOS                  |
+|-----------------|------------------|------------------------|
+| Lint            | CTRL + K, L      | CTRL + CMD + L         |
+| Next Error      | CTRL + K, N      | CTRL + CMD + E         |
+| Prev. Error     | CTRL + K, P      | CTRL + CMD + SHIFT + E |
+| Show All Errors | CTRL + K, A      | CTRL + CMD + A         |
+| Toggle Linter   | CTRL + K, T      | CTRL + CMD + T         |
+
+
+## Support & Bugs
+
+Please use the debug mode and include all console output, and your settings in your bug report. If your issue is specific to a particular linter, please report it on that linter's repository instead.
+
 
 ## Contributing linter plugins
 Please see the documentation on [creating linter plugins](https://sublimelinter.readthedocs.org/en/latest/creating_a_linter.html) for more information.
+
+---------------------------
+
+If you use SublimeLinter and feel it is making your coding life better and easier, please consider making a donation to help fund development and support. Thank you!
+
+Donate via: 
+* [**Paypal**](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=FK7SKD3X8N7BU)
+* [**Bitcoin (Coinbase)**](https://www.coinbase.com/groteworld)
+

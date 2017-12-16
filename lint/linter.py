@@ -60,7 +60,7 @@ class LinterMeta(type):
         if bases:
             setattr(cls, 'disabled', False)
 
-            if name in ('PythonLinter', 'RubyLinter', 'NodeLinter'):
+            if name in ('PythonLinter', 'RubyLinter', 'NodeLinter', 'ComposerLinter'):
                 return
 
             cls.alt_name = cls.make_alt_name(name)
@@ -524,15 +524,33 @@ class Linter(metaclass=LinterMeta):
         Replace tokens with values in settings.
 
         Supported tokens, in the order they are expanded:
+        drive
+            sandbox
+                project 1
+                    path to file
+                        file to lint
+                project 2
+                    path to file
+                        file to lint
+                project 3
+                    path to file
+                        file to lint
 
-        ${project}: full path to the project's parent directory, if available.
-        ${directory}: full path to the parent directory of the current view's file.
+        ${project}:
+            full path of the project root directory
+            -> "/drive/sandbox/project 1"
+
+        ${directory}:
+            full path the current view's parent directory
+            -> "/drive/sandbox/project 1/path to file"
+
+        ${project} and ${directory} expansion are dependent on
+        having a window. Paths do not contain trailing directory separators.
+
         ${home}: the user's $HOME directory.
         ${sublime}: sublime text settings directory.
         ${env:x}: the environment variable 'x'.
 
-        ${project} and ${directory} expansion are dependent on
-        having a window. Paths do not contain trailing directory separators.
 
         """
         def recursive_replace_value(expressions, value):
@@ -561,6 +579,16 @@ class Linter(metaclass=LinterMeta):
         if window:
             view = window.active_view()
 
+            # if a sublime-project file is in the window we use its location
+            # as the root project directory otherwise simply use the project data.
+            # window.project_data delivers the root folder(s) of the view,
+            # even without any project file! more flexible that way:
+            #
+            # 1) have your folder open with no project settings
+            # 2) have more than one folder opened with no project settings
+            # 3) project settings file inside your folder structure
+            # 4) project settings file outside your folder structure
+
             if window.project_file_name():
                 project = os.path.dirname(window.project_file_name()).replace('\\', '/')
 
@@ -568,6 +596,17 @@ class Linter(metaclass=LinterMeta):
                     'token': '${project}',
                     'value': project
                 })
+            else:
+                data = window.project_data() or {}
+                folders = data.get('folders', [])
+                for folder in folders:
+                    # extract the root folder of the currently watched file
+                    filename = view.file_name() or 'FILE NOT ON DISK'
+                    if folder['path'] in filename:
+                        expressions.append({
+                            'token': '${project}',
+                            'value': folder['path']
+                        })
 
             expressions.append({
                 'token': '${directory}',
@@ -1599,7 +1638,7 @@ class Linter(metaclass=LinterMeta):
                     ' (disabled in settings)' if disabled else ''
                 )
             elif status is None:
-                status = 'WARNING: {} deactivated, cannot locate \'{}\''.format(cls.name, executable)
+                status = 'WARNING: {} deactivated, cannot locate \'{}\''.format(cls.name, cls.executable_path)
 
             if status:
                 persist.printf(status)
@@ -1696,6 +1735,10 @@ class Linter(metaclass=LinterMeta):
             return version
         else:
             persist.printf('WARNING: no {} version could be extracted from:\n{}'.format(cls.name, version))
+            persist.debug('          using cmd: {}, env: {}'.format(
+                cmd,
+                util.create_environment()
+            ))
             return None
 
     @staticmethod
@@ -1729,7 +1772,7 @@ class Linter(metaclass=LinterMeta):
 
     def find_errors(self, output):
         """
-        A generator which matches the linter's regex against the linter output.
+        Match the linter's regex against the linter output with this generator.
 
         If multiline is True, split_match is called for each non-overlapping
         match of self.regex. If False, split_match is called for each line
@@ -1776,6 +1819,7 @@ class Linter(metaclass=LinterMeta):
 
             return match, line, col, error, warning, message, near
         else:
+            persist.debug('No match for {}'.format(self.regex))
             return match, None, None, None, None, '', None
 
     def run(self, cmd, code):

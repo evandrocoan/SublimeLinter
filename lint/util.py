@@ -233,7 +233,7 @@ def generate_color_scheme_async():
                 json = f.read()
 
             sublime.decode_value(json)
-        except:
+        except (ValueError, IOError):
             from . import persist
             persist.printf('generate_color_scheme: Preferences.sublime-settings invalid, aborting')
             return
@@ -384,7 +384,7 @@ def generate_menu(name, menu_text):
     """Generate and return a sublime-menu from a template."""
 
     from . import persist
-    plugin_dir = os.path.join(sublime.packages_path(), persist.PLUGIN_DIRECTORY)
+    plugin_dir = os.path.join(sublime.packages_path(), persist.PLUGIN_DIRECTORY, 'menus')
     path = os.path.join(plugin_dir, '{}.sublime-menu.template'.format(name))
 
     with open(path, encoding='utf8') as f:

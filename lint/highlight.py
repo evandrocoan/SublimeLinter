@@ -327,6 +327,9 @@ class Highlight:
         text = self.code[start:end]
         near = self.strip_quotes(near)
 
+        if near == '':
+            return 0
+
         # Add \b fences around the text if it begins/ends with a word character
         fence = ['', '']
 
@@ -372,7 +375,7 @@ class Highlight:
         self.newlines = other.newlines
 
     def set_mark_style(self):
-        """Setup the mark style and flags based on settings."""
+        """Configure the mark style and flags based on settings."""
         self.mark_style = persist.settings.get('mark_style', 'outline')
         self.mark_flags = MARK_STYLES[self.mark_style]
 
