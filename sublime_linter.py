@@ -196,7 +196,7 @@ class SublimeLinter(sublime_plugin.EventListener, Listener):
 
     @classmethod
     def lint_all_views(cls):
-        """Simulate a modification of all views, which will trigger a relint."""
+        """Mimic a modification of all views, which will trigger a relint."""
         def apply(view):
             if view.id() in persist.view_linters:
                 cls.shared_instance.hit(view)
@@ -279,7 +279,7 @@ class SublimeLinter(sublime_plugin.EventListener, Listener):
         self.linted_views.add(vid)
 
         if view.size() == 0:
-            for linter in persist.view_linters[vid]:
+            for linter in persist.view_linters.get(vid, []):
                 linter.clear()
             return
 

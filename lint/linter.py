@@ -1,4 +1,4 @@
-from collections import namedtuple, OrderedDict
+from collections import namedtuple, OrderedDict, ChainMap, Mapping, Sequence
 from distutils.versionpredicate import VersionPredicate
 from functools import lru_cache
 from numbers import Number
@@ -151,10 +151,6 @@ class LinterMeta(type):
         if name:
             name = name.lower()
             persist.linter_classes[name] = cls
-
-            # By setting the lint_settings to None, they will be set the next
-            # time linter_class.settings() is called.
-            cls.lint_settings = None
 
             # The sublime plugin API is not available until plugin_loaded is executed
             if persist.plugin_is_loaded:
@@ -375,7 +371,6 @@ class Linter(metaclass=LinterMeta):
     #
     # Internal class storage, do not set
     #
-    lint_settings = None
     env = None
     disabled = False
     executable_version = None
@@ -416,19 +411,21 @@ class Linter(metaclass=LinterMeta):
         """Return the class name lowercased."""
         return self.__class__.__name__.lower()
 
-    @classmethod
-    def settings(cls):
-        """Return the default settings for this linter, merged with the user settings."""
-        if cls.lint_settings is None:
-            linters = persist.settings.get('linters', {})
-            cls.lint_settings = (cls.defaults or {}).copy()
-            cls.lint_settings.update(linters.get(cls.name, {}))
+    @staticmethod
+    def _get_settings(linter, window=None):
+        defaults = linter.defaults or {}
+        user_settings = persist.settings.get('linters', {}).get(linter.name, {})
 
-        return cls.lint_settings
+        if window:
+            data = window.project_data() or {}
+            project_settings = data.get('SublimeLinter', {}).get('linters', {}).get(linter.name, {})
+        else:
+            project_settings = {}
+
+        return ChainMap({}, project_settings, user_settings, defaults)
 
     def get_view_settings(self):
-        """
-        Return a union of all non-inline settings specific to this view's linter.
+        """Return a union of all settings specific to this view's linter.
 
         The settings are merged in the following order:
 
@@ -438,159 +435,73 @@ class Linter(metaclass=LinterMeta):
 
         After merging, tokens in the settings are replaced.
         """
-        # Start with the overall project settings. Note that when
-        # files are loaded during quick panel preview, it can happen
-        # that they are linted without having a window.
+        # Note that when files are loaded during quick panel preview,
+        # it can happen that they are linted without having a window.
         window = self.view.window()
-
-        if window:
-            data = window.project_data() or {}
-            project_settings = data.get('SublimeLinter', {})
-        else:
-            project_settings = {}
-
-        project_settings = project_settings.get('linters', {}).get(self.name, {})
-
-        # Update the linter's settings with the project settings and rc settings
-        settings = self.merge_project_settings(self.settings().copy(), project_settings)
-        self.replace_settings_tokens(settings)
-        return settings
+        settings = self._get_settings(self, window)
+        return self.replace_settings_tokens(settings)
 
     def replace_settings_tokens(self, settings):
+        """Replace tokens with values in settings.
+
+        Settings can be a string, a mapping or a sequence,
+        and replacement is recursive.
+
+        Utilizes Sublime Text's `expand_variables` API,
+        which uses the `${varname}` syntax
+        and supports placeholders (`${varname:placeholder}`).
+
+        Note that we ship a enhanced version for 'folder' if you have multiple
+        folders open in a window. See `_guess_project_path`.
         """
-        Replace tokens with values in settings.
-
-        Supported tokens, in the order they are expanded:
-        drive
-            sandbox
-                project 1
-                    path to file
-                        file to lint
-                project 2
-                    path to file
-                        file to lint
-                project 3
-                    path to file
-                        file to lint
-
-        ${project}:
-            full path of the project root directory
-            -> "/drive/sandbox/project 1"
-
-        ${directory}:
-            full path the current view's parent directory
-            -> "/drive/sandbox/project 1/path to file"
-
-        ${project} and ${directory} expansion are dependent on
-        having a window. Paths do not contain trailing directory separators.
-
-        ${home}: the user's $HOME directory.
-        ${sublime}: sublime text settings directory.
-        ${env:x}: the environment variable 'x'.
-
-
-        """
-        def recursive_replace_value(expressions, value):
-            if isinstance(value, dict):
-                value = recursive_replace(expressions, value, nested=True)
-            elif isinstance(value, list):
-                value = [recursive_replace_value(expressions, item) for item in value]
-            elif isinstance(value, str):
-                for exp in expressions:
-                    if isinstance(exp['value'], str):
-                        value = value.replace(exp['token'], exp['value'])
-                    else:
-                        value = exp['token'].sub(exp['value'], value)
-
-            return value
-
-        def recursive_replace(expressions, mutable_input, nested=False):
-            for key, value in mutable_input.items():
-                mutable_input[key] = recursive_replace_value(expressions, value)
-            if nested:
-                return mutable_input
-
-        # Expressions are evaluated in list order.
-        expressions = []
-        window = self.view.window()
-        if window:
-            view = window.active_view()
-            window_vars = window.extract_variables()
-            directory = (
-                os.path.dirname(view.file_name()).replace('\\', '/') if
-                view and view.file_name() else "FILE NOT ON DISK")
-
-            if not view or not view.file_name():
-                return
-
-            # window.project_data delivers the root folder(s) of the view,
-            # even without any project file! more flexible that way:
-            #
-            # 1) have your folder open with no project settings
-            # 2) have more than one folder opened with no project settings
-            # 3) project settings file inside your folder structure
-            # 4) project settings file outside your folder structure
-
-            if window.project_file_name():
-                project = os.path.dirname(window.project_file_name()).replace('\\', '/')
-
-                expressions.append({
-                    'token': '${project}',
-                    'value': project
-                })
+        def recursive_replace(variables, value):
+            if isinstance(value, str):
+                value = sublime.expand_variables(value, variables)
+                return os.path.expanduser(value)
+            elif isinstance(value, Mapping):
+                return {key: recursive_replace(variables, val)
+                        for key, val in value.items()}
+            elif isinstance(value, Sequence):
+                return [recursive_replace(variables, item)
+                        for item in value]
             else:
-                data = window.project_data() or {}
-                folders = data.get('folders', [])
-                for folder in folders:
-                    # extract the root folder of the currently watched file
-                    filename = view.file_name() or 'FILE NOT ON DISK'
-                    if folder['path'] in filename:
-                        expressions.append({
-                            'token': '${project}',
-                            'value': folder['path']
-                        })
+                return value
 
-            expressions.append({
-                'token': '${directory}',
-                'value': directory
-            })
+        window = self.view.window()
+        variables = ChainMap(
+            {}, window.extract_variables() if window else {}, os.environ)
 
-            expressions.append({
-                'token': '${root}',
-                'value': window_vars.get('folder', None) or directory
-            })
+        filename = self.view.file_name()
+        project_folder = self._guess_project_path(window, filename)
+        if project_folder:
+            variables['folder'] = project_folder
 
-        expressions.append({
-            'token': '${home}',
-            'value': os.path.expanduser('~').rstrip(os.sep).rstrip(os.altsep).replace('\\', '/') or 'HOME NOT SET'
-        })
+        if persist.debug_mode():
+            import pprint
+            self._debug_print_available_variables(pprint.pformat(dict(variables), indent=2))
+        return recursive_replace(variables, settings)
 
-        expressions.append({
-            'token': '${sublime}',
-            'value': sublime.packages_path()
-        })
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _debug_print_available_variables(variables):
+        persist.debug('Available variables: {}'.format(variables))
 
-        expressions.append({
-            'token': re.compile(r'\${env:(?P<variable>[^}]+)}'),
-            'value': (
-                lambda m: os.getenv(m.group('variable')) if
-                os.getenv(m.group('variable')) else
-                "%s NOT SET" % m.group('variable'))
-        })
+    @staticmethod
+    def _guess_project_path(window, filename):
+        if not window:
+            return
 
-        recursive_replace(expressions, settings)
+        folders = window.folders()
+        if not folders:
+            return
 
-    def merge_project_settings(self, view_settings, project_settings):
-        """
-        Return this linter's view settings merged with the current project settings.
+        if not filename:
+            return folders[0]
 
-        Subclasses may override this if they wish to do something more than
-        replace view settings with inline settings of the same name.
-        The settings object may be changed in place.
-
-        """
-        view_settings.update(project_settings)
-        return view_settings
+        for folder in folders:
+            # Take the first one; should we take the deepest one? The shortest?
+            if folder in filename:
+                return folder
 
     @classmethod
     def assign(cls, view, linter_name=None, reset=False):
@@ -661,10 +572,6 @@ class Linter(metaclass=LinterMeta):
     @classmethod
     def reload(cls):
         """Assign new instances of linters to views."""
-        # Merge linter default settings with user settings
-        for name, linter in persist.linter_classes.items():
-            linter.lint_settings = None
-
         for vid, linters in persist.view_linters.items():
             for linter in linters:
                 linter.clear()
@@ -1153,7 +1060,7 @@ class Linter(metaclass=LinterMeta):
 
         else:
             if m.near:
-                near = self.strip_quotes(m.mear)
+                near = self.strip_quotes(m.near)
                 length = len(near)
                 return line, col, col + length
             else:
