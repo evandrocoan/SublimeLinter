@@ -603,7 +603,7 @@ class Linter(metaclass=LinterMeta):
         override this method.
 
         Note that this method will be called statically as well as per
-        instance. So you can rely on `get_view_settings` to be available.
+        instance. So you *can't* rely on `get_view_settings` to be available.
 
         `context_sensitive_executable_path` is guaranteed to be called per
         instance and might be the better override point.
@@ -621,8 +621,6 @@ class Linter(metaclass=LinterMeta):
         Otherwise the result of build_cmd is returned.
         """
         cmd = self.cmd
-        if cmd is None:
-            return None
 
         if callable(cmd):
             cmd = cmd()
@@ -672,23 +670,44 @@ class Linter(metaclass=LinterMeta):
 
         if not path:
             util.printf('WARNING: {} cannot locate \'{}\''.format(self.name, which))
-            return ''
+            return None
 
         cmd[0:1] = util.convert_type(path, [])
         return self.insert_args(cmd)
 
     def context_sensitive_executable_path(self, cmd):
-        """
-        Calculate the context-sensitive executable path, return a tuple of (have_path, path).
+        """Calculate the context-sensitive executable path.
 
-        Subclasses may override this to return a special path.
+        Subclasses may override this to return a special path. The default
+        implementation looks for a setting `executable` and if set will use
+        that.
 
         Return (True, '<path>') if you can resolve the executable given at cmd[0]
         Return (True, None) if you want to skip the linter
         Return (False, None) if you want to kick in the default implementation
             of SublimeLinter
 
+        Notable: `<path>` can be a list/tuple or str
+
         """
+        settings = self.get_view_settings()
+        executable = settings.get('executable', None)
+        if executable:
+            persist.debug(
+                "{}: wanted executable is '{}'".format(self.name, executable)
+            )
+
+            # If `executable` is an iterable, we can only assume it will work.
+            if isinstance(executable, str) and not util.can_exec(executable):
+                persist.printf(
+                    "ERROR: {} deactivated, cannot locate '{}' "
+                    .format(self.name, executable)
+                )
+                # no fallback, the user specified something, so we err
+                return True, None
+
+            return True, executable
+
         return False, None
 
     def insert_args(self, cmd):
@@ -856,17 +875,20 @@ class Linter(metaclass=LinterMeta):
                     options[name] = value
 
     def get_chdir(self, settings):
-        """Find the chdir to use with the linter."""
+        """Return the working dir for this lint."""
         chdir = settings.get('chdir', None)
 
-        if chdir and os.path.isdir(chdir):
-            persist.debug('chdir has been set to: {0}'.format(chdir))
-            return chdir
-        else:
-            if self.filename:
-                return os.path.dirname(self.filename)
+        if chdir:
+            if os.path.isdir(chdir):
+                return chdir
             else:
-                return os.path.realpath('.')
+                persist.printf(
+                    "{}: WARNING: wanted working_dir '{}' is not a dir"
+                    "".format(self.name, chdir)
+                )
+                return None
+
+        return self._guess_project_path(self.view.window(), self.view.file_name())
 
     def get_error_type(self, error, warning):  # noqa:D102
         if error:
@@ -877,25 +899,26 @@ class Linter(metaclass=LinterMeta):
             return self.default_type
 
     def lint(self, code, hit_time):
-        """
-        Perform the lint, retrieve the results, and add marks to the view.
+        """Perform the lint, retrieve the results, and add marks to the view.
 
         The flow of control is as follows:
 
-        - Get the command line. If it is an empty string, bail.
+        - Get the command line.
         - Run the linter.
         - If the view has been modified since the original hit_time, stop.
         - Parse the linter output with the regex.
-        - Highlight warnings and errors.
         """
         if self.disabled:
             return []
 
-        cmd = self.get_cmd()
-        settings = self.get_view_settings()
-        chdir = self.get_chdir(settings)
-
-        with util.cd(chdir):
+        # `cmd = None` is a special API signal, that the plugin author
+        # implemented its own `run`
+        if self.cmd is None:
+            output = self.run(None, code)
+        else:
+            cmd = self.get_cmd()
+            if not cmd:  # We couldn't find a executable
+                return []
             output = self.run(cmd, code)
 
         if not output:
@@ -933,15 +956,22 @@ class Linter(metaclass=LinterMeta):
         in output.
         """
         if self.multiline:
-            errors = self.regex.finditer(output)
-            if errors:
-                for error in errors:
-                    yield self.split_match(error)
-            else:
-                yield self.split_match(None)
+            matches = list(self.regex.finditer(output))
+            if not matches:
+                persist.debug(
+                    '{}: No matches for regex: {}'.format(self.name, self.regex.pattern))
+                return
+
+            for match in matches:
+                yield self.split_match(match)
         else:
             for line in output.splitlines():
-                yield self.split_match(self.regex.match(line.rstrip()))
+                match = self.regex.match(line.rstrip())
+                if match:
+                    yield self.split_match(match)
+                else:
+                    persist.debug(
+                        "{}: No match for line: '{}'".format(self.name, line))
 
     def split_match(self, match):
         """
@@ -954,28 +984,25 @@ class Linter(metaclass=LinterMeta):
         """
         match_dict = MATCH_DICT.copy()
 
-        if not match:
-            persist.debug('No match for regex: {}'.format(self.regex.pattern))
-        else:
-            match_dict.update({
-                k: v
-                for k, v in match.groupdict().items()
-                if k in match_dict
-            })
-            match_dict["match"] = match
+        match_dict.update({
+            k: v
+            for k, v in match.groupdict().items()
+            if k in match_dict
+        })
+        match_dict["match"] = match
 
-            # normalize line and col if necessary
-            line = match_dict["line"]
-            if line:
-                match_dict["line"] = int(line) - self.line_col_base[0]
+        # normalize line and col if necessary
+        line = match_dict["line"]
+        if line:
+            match_dict["line"] = int(line) - self.line_col_base[0]
 
-            col = match_dict["col"]
-            if col:
-                if col.isdigit():
-                    col = int(col) - self.line_col_base[1]
-                else:
-                    col = len(col)
-                match_dict["col"] = col
+        col = match_dict["col"]
+        if col:
+            if col.isdigit():
+                col = int(col) - self.line_col_base[1]
+            else:
+                col = len(col)
+            match_dict["col"] = col
 
         return LintMatch(**match_dict)
 
@@ -999,7 +1026,7 @@ class Linter(metaclass=LinterMeta):
             "linter": self.name,
             "error_type": error_type,
             "code": m.error or m.warning or '',
-            "msg": m.message,
+            "msg": m.message.strip(),
         }
 
     def maybe_fix_tab_width(self, line, col, vv):
@@ -1250,13 +1277,6 @@ class Linter(metaclass=LinterMeta):
         method, it will need to override this method.
 
         """
-        if persist.debug_mode():
-            util.printf('{}: {} {}'.format(
-                self.name,
-                os.path.basename(self.filename or '<unsaved>'),
-                cmd)
-            )
-
         if self.tempfile_suffix:
             if self.tempfile_suffix != '-':
                 return self.tmpfile(cmd, code)
@@ -1289,21 +1309,47 @@ class Linter(metaclass=LinterMeta):
         elif not code:
             cmd.append(self.filename)
 
+        settings = self.get_view_settings()
+        cwd = self.get_chdir(settings)
+
+        if persist.debug_mode():
+            util.printf('{}: {} {}'.format(
+                self.name,
+                os.path.basename(self.filename or '<unsaved>'),
+                cmd)
+            )
+            if cwd:
+                util.printf('{}: cwd: {}'.format(self.name, cwd))
+
         return util.communicate(
             cmd,
             code,
             output_stream=self.error_stream,
-            env=self.env)
+            env=self.env,
+            cwd=cwd)
 
     def tmpfile(self, cmd, code, suffix=''):
         """Run an external executable using a temp file to pass code and return its output."""
+        settings = self.get_view_settings()
+        cwd = self.get_chdir(settings)
+
+        if persist.debug_mode():
+            util.printf('{}: {} {}'.format(
+                self.name,
+                os.path.basename(self.filename or '<unsaved>'),
+                cmd)
+            )
+            if cwd:
+                util.printf('{}: cwd: {}'.format(self.name, cwd))
+
         return util.tmpfile(
             cmd,
             code,
             self.filename,
             suffix or self.get_tempfile_suffix(),
             output_stream=self.error_stream,
-            env=self.env)
+            env=self.env,
+            cwd=cwd)
 
     def tmpdir(self, cmd, files, code):
         """Run an external executable using a temp dir filled with files and return its output."""

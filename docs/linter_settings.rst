@@ -1,6 +1,6 @@
 Linter Settings
 ===============
-Each linter plugin is can provide its own settings. SublimeLinter already provides these for every linter:
+Each linter plugin can provide its own settings. SublimeLinter already provides these for every linter:
 
 
 disable
@@ -39,25 +39,28 @@ The value must be a string, corresponding to a valid directory path.
 .. code-block:: json
 
     {
-        "chdir": "${project}"
+        "chdir": "${folder:$file_path}"
     }
 
-With the above example, the linter will get invoked from the ``${project}`` directory (see :ref:`Setting Tokens <settings-tokens>` for more info on using tokens).
+With the above example,
+the linter will get invoked from the ``${folder}`` directory
+or the file's directory if it is not contained within a project folder
+(see :ref:`Settings Expansion <settings-expansion>` for more info on using variables).
 
 .. note::
 
      If the value of ``chdir`` is unspecified (or inaccessible), then:
 
-     - If linting an unsaved file, the directory is unchanged
-
      - If linting a saved file, the directory is set to that of the linted file
+
+     - If linting an unsaved file, the directory is unchanged
 
 
 excludes
 --------
 This setting specifies a list of path patterns to exclude from linting. If there is only a single pattern, the value may be a string. Otherwise it must be an array of patterns.
 
-Patterns are matched against a file’s **absolute path** with all symlinks/shortcuts resolved, using |_fnmatch|. This means to match a filename, you must match everything in the path before the filename. For example, to exclude any python files whose name begins with “foo”, you would use this pattern:
+Patterns are matched against a file’s **absolute path** with all symlinks/shortcuts resolved. This means to match a filename, you must match everything in the path before the filename. For example, to exclude any python files whose name begins with “foo”, you would use this pattern:
 
 .. code-block:: json
 

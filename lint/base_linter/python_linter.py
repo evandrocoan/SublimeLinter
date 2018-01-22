@@ -56,43 +56,17 @@ class PythonLinter(linter.Linter):
 
     def context_sensitive_executable_path(self, cmd):
         """Try to find an executable for a given cmd."""
+        # The default implementation will look for a user defined `executable`
+        # setting.
+        success, executable = super().context_sensitive_executable_path(cmd)
+        if success:
+            return success, executable
+
         settings = self.get_view_settings()
-
-        # If the user explicitly set an executable, it takes precedence.
-        # We expand environment variables. E.g. a user could have a project
-        # structure where a virtual environment is always located within
-        # the project structure. She could then simply specify
-        # `${project_path}/venv/bin/flake8`. Note that setting `python`
-        # to a path will have a similar effect.
-        executable = settings.get('executable', '')
-        if executable:
-            executable = expand_variables(executable)
-
-            persist.debug(
-                "{}: wanted executable is '{}'".format(self.name, executable)
-            )
-
-            if util.can_exec(executable):
-                return True, executable
-
-            persist.printf(
-                "ERROR: {} deactivated, cannot locate '{}' "
-                .format(self.name, executable)
-            )
-            # no fallback, the user specified something, so we err
-            return True, None
 
         # `python` can be number or a string. If it is a string it should
         # point to a python environment, NOT a python binary.
-        # We expand environment variables. E.g. a user could have a project
-        # structure where virtual envs are located always like such
-        # `some/where/venvs/${project_base_name}` or she has the venv
-        # contained in the project dir `${project_path}/venv`. She then
-        # could edit the global settings once and can be sure that always the
-        # right linter installed in the virtual environment gets executed.
         python = settings.get('python', None)
-        if isinstance(python, str):
-            python = expand_variables(python)
 
         persist.debug(
             "{}: wanted python is '{}'".format(self.name, python)
@@ -206,27 +180,6 @@ def find_script_by_python_env(python_env_path, script):
     return None
 
 
-def expand_variables(string):
-    """Expand environment, user, and sublime text variables in the given string.
-
-    User variables:
-    https://docs.python.org/3/library/os.path.html#os.path.expanduser
-
-    Environment variables:
-    See https://docs.python.org/3/library/os.path.html#os.path.expandvars
-
-    Sublime Text variables:
-    e.g. "packages", "platform", "file", "file_path", file_name",
-    "file_base_name", "file_extension, "folder", "project", project_path",
-    "project_name", "project_base_name, "project_extension".
-    """
-    string = os.path.expanduser(string)
-    string = os.path.expandvars(string)
-    window = sublime.active_window()
-    env = window.extract_variables()
-    return sublime.expand_variables(string, env)
-
-
 def get_project_path():
     """Return the project_path using Sublime's window.project_data() API."""
     window = sublime.active_window()
@@ -259,8 +212,7 @@ def ask_pipenv(linter_name, chdir):
 @lru_cache(maxsize=None)
 def _ask_pipenv(linter_name, chdir):
     cmd = ['pipenv', '--venv']
-    with util.cd(chdir):
-        venv = _communicate(cmd).strip().split('\n')[-1]
+    venv = _communicate(cmd, cwd=chdir).strip().split('\n')[-1]
 
     if not venv:
         return
@@ -268,7 +220,7 @@ def _ask_pipenv(linter_name, chdir):
     return find_script_by_python_env(venv, linter_name)
 
 
-def _communicate(cmd):
+def _communicate(cmd, cwd):
     """Short wrapper around subprocess.check_output to eat all errors."""
     env = util.create_environment()
     info = None
@@ -281,7 +233,7 @@ def _communicate(cmd):
 
     try:
         return subprocess.check_output(
-            cmd, env=env, startupinfo=info, universal_newlines=True
+            cmd, env=env, startupinfo=info, universal_newlines=True, cwd=cwd
         )
     except Exception as err:
         persist.debug(
