@@ -4,7 +4,6 @@ import json
 import hashlib
 import codecs
 
-from functools import lru_cache
 from os import path, access, X_OK
 from .. import linter, util
 
@@ -43,6 +42,12 @@ class ComposerLinter(linter.Linter):
 
         Return a tuple of (have_path, path).
         """
+        # The default implementation will look for a user defined `executable`
+        # setting.
+        success, executable = super().context_sensitive_executable_path(cmd)
+        if success:
+            return success, executable
+
         local_cmd = None
         global_cmd = util.which(cmd[0])
 
@@ -50,6 +55,9 @@ class ComposerLinter(linter.Linter):
             local_cmd = self.find_local_cmd_path(cmd[0])
 
         if not local_cmd and not global_cmd:
+            msg = 'WARNING: {} cannot locate \'{}\''.format(self.name, cmd[0])
+            util.printf(msg)
+            util.message(msg)
             return True, None
 
         composer_cmd_path = local_cmd if local_cmd else global_cmd
@@ -167,24 +175,6 @@ class ComposerLinter(linter.Linter):
         return hashlib.sha1(f.read().encode('utf-8')).hexdigest()
 
     @classmethod
-    @lru_cache(maxsize=None)
-    def can_lint(cls, syntax):
-        """
-        Determine if the linter can handle the provided syntax.
-
-        This is an optimistic determination based on the linter's syntax alone.
-        """
-        can = False
-        syntax = syntax.lower()
-
-        if cls.syntax:
-            if isinstance(cls.syntax, (tuple, list)):
-                can = syntax in cls.syntax
-            elif cls.syntax == '*':
-                can = True
-            elif isinstance(cls.syntax, str):
-                can = syntax == cls.syntax
-            else:
-                can = cls.syntax.match(syntax) is not None
-
-        return can
+    def can_lint(cls):
+        """Assume the linter can lint."""
+        return True

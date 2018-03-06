@@ -1,12 +1,16 @@
 """This module exports the PythonLinter subclass of Linter."""
 
 from functools import lru_cache
+import logging
 import os
 import re
 import subprocess
 
 import sublime
-from .. import linter, persist, util
+from .. import linter, util
+
+
+logger = logging.getLogger(__name__)
 
 
 class PythonLinter(linter.Linter):
@@ -17,130 +21,71 @@ class PythonLinter(linter.Linter):
     By doing so, they automatically get the following features:
 
     - Automatic discovery of virtual environments using `pipenv`
-
     - Support for a "python" setting.
-
-      python can be set to a version, in which case we try to find
-      a python on your system matching that version.
-
-      python can alternatively set to a base path of a python
-      environment. We then look for linter binaries within that
-      environment. A python environment can be a real installation
-      or a virtual environment
-
     - Support for a "executable" setting.
-
-      A set "executable" will take precedence over any other method.
-      It must point to a real, executable binary.
-
     """
 
     @classmethod
-    @lru_cache(maxsize=None)
-    def can_lint(cls, syntax):
-        """Determine optimistically if the linter can handle the provided syntax."""
-        can = False
-        syntax = syntax.lower()
-
-        if cls.syntax:
-            if isinstance(cls.syntax, (tuple, list)):
-                can = syntax in cls.syntax
-            elif cls.syntax == '*':
-                can = True
-            elif isinstance(cls.syntax, str):
-                can = syntax == cls.syntax
-            else:
-                can = cls.syntax.match(syntax) is not None
-
-        return can
+    def can_lint(cls):
+        """Assume the linter can lint."""
+        return True
 
     def context_sensitive_executable_path(self, cmd):
         """Try to find an executable for a given cmd."""
+        # The default implementation will look for a user defined `executable`
+        # setting.
+        success, executable = super().context_sensitive_executable_path(cmd)
+        if success:
+            return success, executable
+
         settings = self.get_view_settings()
-
-        # If the user explicitly set an executable, it takes precedence.
-        # We expand environment variables. E.g. a user could have a project
-        # structure where a virtual environment is always located within
-        # the project structure. She could then simply specify
-        # `${project_path}/venv/bin/flake8`. Note that setting `python`
-        # to a path will have a similar effect.
-        executable = settings.get('executable', '')
-        if executable:
-            executable = expand_variables(executable)
-
-            persist.debug(
-                "{}: wanted executable is '{}'".format(self.name, executable)
-            )
-
-            if util.can_exec(executable):
-                return True, executable
-
-            persist.printf(
-                "ERROR: {} deactivated, cannot locate '{}' "
-                .format(self.name, executable)
-            )
-            # no fallback, the user specified something, so we err
-            return True, None
 
         # `python` can be number or a string. If it is a string it should
         # point to a python environment, NOT a python binary.
-        # We expand environment variables. E.g. a user could have a project
-        # structure where virtual envs are located always like such
-        # `some/where/venvs/${project_base_name}` or she has the venv
-        # contained in the project dir `${project_path}/venv`. She then
-        # could edit the global settings once and can be sure that always the
-        # right linter installed in the virtual environment gets executed.
         python = settings.get('python', None)
-        if isinstance(python, str):
-            python = expand_variables(python)
 
-        persist.debug(
+        logger.info(
             "{}: wanted python is '{}'".format(self.name, python)
         )
 
         cmd_name = cmd[0] if isinstance(cmd, (list, tuple)) else cmd
 
         if python:
-            if isinstance(python, str):
-                executable = find_script_by_python_env(
-                    python, cmd_name
-                )
-                if not executable:
-                    persist.printf(
-                        "WARNING: {} deactivated, cannot locate '{}' "
+            python = str(python)
+            if VERSION_RE.match(python):
+                python_bin = find_python_version(python)
+                if python_bin is None:
+                    logger.error(
+                        "{} deactivated, cannot locate '{}' "
                         "for given python '{}'"
                         .format(self.name, cmd_name, python)
                     )
                     # Do not fallback, user specified something we didn't find
                     return True, None
 
-                return True, executable
+                logger.info(
+                    "{}: Using {} for given python '{}'"
+                    .format(self.name, python_bin, python)
+                )
+                return True, [python_bin, '-m', cmd_name]
 
             else:
-                executable = find_script_by_python_version(
-                    cmd_name, str(python)
-                )
-
-                if executable is None:
-                    persist.printf(
-                        "WARNING: {} deactivated, cannot locate '{}' "
-                        "for given python '{}'"
-                        .format(self.name, cmd_name, python)
+                if not os.path.exists(python):
+                    logger.error(
+                        "{} deactivated, cannot locate '{}'"
+                        .format(self.name, python)
                     )
+                    # Do not fallback, user specified something we didn't find
                     return True, None
 
-                persist.debug(
-                    "{}: Using {} for given python '{}'"
-                    .format(self.name, executable, python)
-                )
-                return True, executable
+                return True, [python, '-m', cmd_name]
 
         # If we're here the user didn't specify anything. This is the default
         # experience. So we kick in some 'magic'
-        chdir = self.get_chdir(settings)
-        executable = ask_pipenv(cmd[0], chdir)
+        cwd = self.get_working_dir(settings)
+        executable = ask_pipenv(cmd[0], cwd)
         if executable:
-            persist.debug(
+            logger.info(
                 "{}: Using {} according to 'pipenv'"
                 .format(self.name, executable)
             )
@@ -149,15 +94,15 @@ class PythonLinter(linter.Linter):
         # Should we try a `pyenv which` as well? Problem: I don't have it,
         # it's MacOS only.
 
-        persist.debug(
+        logger.info(
             "{}: trying to use globally installed {}"
             .format(self.name, cmd_name)
         )
         # fallback, similiar to a which(cmd)
         executable = util.which(cmd_name)
         if executable is None:
-            persist.printf(
-                "WARNING: cannot locate '{}'. Fill in the 'python' or "
+            logger.warning(
+                "cannot locate '{}'. Fill in the 'python' or "
                 "'executable' setting."
                 .format(self.name)
             )
@@ -170,26 +115,11 @@ def find_python_version(version):  # type: Str
     for python in util.find_executables('python'):
         python_version = get_python_version(python)
         if version_fulfills_request(python_version, requested_version):
-            yield python
+            return python
 
     return None
 
 
-@lru_cache(maxsize=None)
-def find_script_by_python_version(script_name, version):
-    """Return full path to a script, given just a python version."""
-    # They can be multiple matching pythons. We try to find a python with
-    # its complete environment, not just a symbolic link or so.
-    for python in find_python_version(version):
-        python_env = os.path.dirname(python)
-        script_path = find_script_by_python_env(python_env, script_name)
-        if script_path:
-            return script_path
-
-    return None
-
-
-@lru_cache(maxsize=None)
 def find_script_by_python_env(python_env_path, script):
     """Return full path to a script, given a python environment base dir."""
     posix = sublime.platform() in ('osx', 'linux')
@@ -199,32 +129,11 @@ def find_script_by_python_env(python_env_path, script):
     else:
         full_path = os.path.join(python_env_path, 'Scripts', script + '.exe')
 
-    persist.printf("trying {}".format(full_path))
+    logger.info("trying {}".format(full_path))
     if os.path.exists(full_path):
         return full_path
 
     return None
-
-
-def expand_variables(string):
-    """Expand environment, user, and sublime text variables in the given string.
-
-    User variables:
-    https://docs.python.org/3/library/os.path.html#os.path.expanduser
-
-    Environment variables:
-    See https://docs.python.org/3/library/os.path.html#os.path.expandvars
-
-    Sublime Text variables:
-    e.g. "packages", "platform", "file", "file_path", file_name",
-    "file_base_name", "file_extension, "folder", "project", project_path",
-    "project_name", "project_base_name, "project_extension".
-    """
-    string = os.path.expanduser(string)
-    string = os.path.expandvars(string)
-    window = sublime.active_window()
-    env = window.extract_variables()
-    return sublime.expand_variables(string, env)
 
 
 def get_project_path():
@@ -239,7 +148,7 @@ def get_project_path():
         return folders[0]['path']  # ?
 
 
-def ask_pipenv(linter_name, chdir):
+def ask_pipenv(linter_name, cwd):
     """Ask pipenv for a virtual environment and maybe resolve the linter."""
     # Some pre-checks bc `pipenv` is super slow
     project_path = get_project_path()
@@ -253,14 +162,13 @@ def ask_pipenv(linter_name, chdir):
     # Defer the real work to another function we can cache.
     # ATTENTION: If the user has a Pipfile, but did not (yet) installed the
     # environment, we will cache a wrong result here.
-    return _ask_pipenv(linter_name, chdir)
+    return _ask_pipenv(linter_name, cwd)
 
 
 @lru_cache(maxsize=None)
-def _ask_pipenv(linter_name, chdir):
+def _ask_pipenv(linter_name, cwd):
     cmd = ['pipenv', '--venv']
-    with util.cd(chdir):
-        venv = _communicate(cmd).strip().split('\n')[-1]
+    venv = _communicate(cmd, cwd=cwd).strip().split('\n')[-1]
 
     if not venv:
         return
@@ -268,7 +176,7 @@ def _ask_pipenv(linter_name, chdir):
     return find_script_by_python_env(venv, linter_name)
 
 
-def _communicate(cmd):
+def _communicate(cmd, cwd):
     """Short wrapper around subprocess.check_output to eat all errors."""
     env = util.create_environment()
     info = None
@@ -281,10 +189,10 @@ def _communicate(cmd):
 
     try:
         return subprocess.check_output(
-            cmd, env=env, startupinfo=info, universal_newlines=True
+            cmd, env=env, startupinfo=info, universal_newlines=True, cwd=cwd
         )
     except Exception as err:
-        persist.debug(
+        logger.info(
             "executing {} failed: reason: {}".format(cmd, str(err))
         )
         return ''
@@ -303,8 +211,8 @@ def get_python_version(path):
         # 'python -V' returns 'Python <version>', extract the version number
         return extract_major_minor_version(output.split(' ')[1])
     except Exception as ex:
-        util.printf(
-            'ERROR: an error occurred retrieving the version for {}: {}'
+        logger.error(
+            'an error occurred retrieving the version for {}: {}'
             .format(path, str(ex)))
 
         return {'major': None, 'minor': None}

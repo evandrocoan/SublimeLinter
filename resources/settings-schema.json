@@ -11,6 +11,16 @@
         "gutter_theme":{
             "type":"string"
         },
+        "highlights.time_to_idle":{
+            "type":"number"
+        },
+        "highlights.demote_while_editing":{
+            "type":"string",
+            "pattern":"^(none|ws_regions|warnings)$"
+        },
+        "highlights.demote_scope": {
+            "type":"string"
+        },
         "lint_mode":{
             "type":"string",
             "pattern":"^(background|load_save|manual)$"
@@ -72,9 +82,6 @@
         "paths":{
             "type":"object"
         },
-        "python_paths":{
-            "type":"object"
-        },
         "shell_timeout":{
             "type":"number"
         },
@@ -89,6 +96,12 @@
         },
         "syntax_map":{
             "type":"object"
+        },
+        "statusbar.counters_template":{
+            "type":"string"
+        },
+        "statusbar.messages_template":{
+            "type":"string"
         },
         "styles":{
             "type":"array",
@@ -129,5 +142,6 @@
                 "additionalProperties":false
             }
         }
-    }
+    },
+    "additionalProperties": false
 }

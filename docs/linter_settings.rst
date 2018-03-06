@@ -1,21 +1,41 @@
-.. include:: defines.inc
-
 Linter Settings
 ===============
-Each linter plugin is responsible for providing its own settings. In addition to the linter-provided settings, |sl| adds the following settings to every linter:
+Each linter plugin can provide its own settings. SublimeLinter already provides these for every linter:
 
-
-.. _disable-linter-setting:
 
 disable
---------
+-------
 Disables the linter.
+
+
+executable
+----------
+
+At any time you can manually set the executable a linter should use.
+
+.. code-block:: json
+
+    "executable": "${folder}/node_modules/bin/eslint"
+
+See :ref:`Settings Expansion <settings-expansion>` for more info on using variables.
+
+
+env
+---
+Set additional environment variables.
+
+.. code-block:: json
+
+    "env": "{'GEM_HOME': '~/foo/bar'}"
+
 
 args
 ----
-This setting specifies extra arguments to pass to an external binary. This is useful when a linter binary supports an option that is not part of the linter’s settings.
+Specifies extra arguments to pass to an external binary.
 
-The value may be a string or an array. If it is a string, it will be parsed as if it were passed on a command line. For example, these values are equivalent:
+The value may be a string or an array. If it is a string,
+it will be parsed as if it were passed on a command line.
+For example, these values are equivalent:
 
 .. code-block:: json
 
@@ -33,39 +53,35 @@ The value may be a string or an array. If it is a string, it will be parsed as i
 
 The default value is an empty array.
 
-.. note::
 
-   If a linter runs python code directly, without calling an external binary, it is up to the linter to decide what to do with this setting.
-
-
-chdir
------
+working_dir
+-----------
 This setting specifies the linter working directory.
-
 The value must be a string, corresponding to a valid directory path.
+
+For example (this is also the default):
 
 .. code-block:: json
 
     {
-        "chdir": "${project}",
+        "working_dir": "${folder:$file_path}"
     }
 
-With the above example, the linter will get invoked from the ``${project}`` directory (see :ref:`Setting Tokens <settings-tokens>` for more info on using tokens).
+Here the linter will get invoked from the ``${folder}`` directory
+or the file's directory if it is not contained within a project folder.
 
-.. note::
-
-     If the value of ``chdir`` is unspecified (or inaccessible), then:
-
-     - If linting an unsaved file, the directory is unchanged
-
-     - If linting a saved file, the directory is set to that of the linted file
+See :ref:`Settings Expansion <settings-expansion>` for more info on using variables.
 
 
 excludes
 --------
-This setting specifies a list of path patterns to exclude from linting. If there is only a single pattern, the value may be a string. Otherwise it must be an array of patterns.
+This setting specifies a list of path patterns to exclude from linting.
+If there is only a single pattern, the value may be a string.
+Otherwise it must be an array of patterns.
 
-Patterns are matched against a file’s **absolute path** with all symlinks/shortcuts resolved, using |_fnmatch|. This means to match a filename, you must match everything in the path before the filename. For example, to exclude any python files whose name begins with “foo”, you would use this pattern:
+Patterns are matched against a file’s **absolute path** with all symlinks/shortcuts resolved.
+This means to match a filename, you must match everything in the path before the filename.
+For example, to exclude any python files whose name begins with “foo”, you would use this pattern:
 
 .. code-block:: json
 
@@ -75,3 +91,13 @@ Patterns are matched against a file’s **absolute path** with all symlinks/shor
 
 The default value is an empty array.
 
+
+python
+------
+
+This should point to a python binary on your system. Alternatively
+it can be set to a version, in which case we try to find a python
+binary on your system matching that version (using PATH).
+
+It then executes ``python -m script_name``
+(where script_name is e.g. ``flake8``).

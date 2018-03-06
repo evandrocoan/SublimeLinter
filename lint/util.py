@@ -2,23 +2,16 @@
 
 from functools import lru_cache
 import locale
+import logging
 from numbers import Number
 import os
-import getpass
 import re
-import shutil
-import stat
 import sublime
 import subprocess
 import tempfile
 
 
-from copy import deepcopy
-
-from .const import WARNING, ERROR
-
-if sublime.platform() != 'windows':
-    import pwd
+logger = logging.getLogger(__name__)
 
 
 STREAM_STDOUT = 1
@@ -26,12 +19,6 @@ STREAM_STDERR = 2
 STREAM_BOTH = STREAM_STDOUT + STREAM_STDERR
 
 ANSI_COLOR_RE = re.compile(r'\033\[[0-9;]*m')
-
-# Temp directory used to store temp files for linting
-tempdir = os.path.join(
-    tempfile.gettempdir(),
-    "SublimeLinter3-" + getpass.getuser()
-)
 
 
 def printf(*args):
@@ -42,6 +29,16 @@ def printf(*args):
     print()
 
 
+def message(message):
+    window = sublime.active_window()
+    window.run_command("sublime_linter_display_panel", {"msg": message})
+
+
+def clear_message():
+    window = sublime.active_window()
+    window.run_command("sublime_linter_remove_panel")
+
+
 def get_syntax(view):
     """
     Return the view's syntax.
@@ -49,7 +46,7 @@ def get_syntax(view):
     or the syntax it is mapped to in the "syntax_map" setting.
     """
     syntax_re = re.compile(r'(?i)/([^/]+)\.(?:tmLanguage|sublime-syntax)$')
-    view_syntax = view.settings().get('syntax', '')
+    view_syntax = view.settings().get('syntax') or ''
     mapped_syntax = ''
 
     if view_syntax:
@@ -66,13 +63,6 @@ def get_syntax(view):
     return mapped_syntax or view_syntax
 
 
-class Borg:
-    _shared_state = {}
-
-    def __init__(self):
-        self.__dict__ = self._shared_state
-
-
 def is_lintable(view):
     """
     Return true when a view is not lintable, e.g. scratch, read_only, etc.
@@ -87,11 +77,11 @@ def is_lintable(view):
 
     """
     if (
-        not view or
         not view.window() or
         view.is_scratch() or
         view.is_read_only() or
-        view.settings().get("repl")
+        view.settings().get("repl") or
+        view.settings().get('is_widget')
     ):
         return False
     elif (
@@ -104,147 +94,20 @@ def is_lintable(view):
         return True
 
 
-def is_none_or_zero(we_count):
-    """Check warning/error count of dict."""
-    if not we_count:
-        return True
-    elif we_count[WARNING] + we_count[ERROR] == 0:
-        return True
-    else:
-        return False
-
-
-def get_active_view(view=None):
-    if view:
-        window = view.window()
-        if not window:
-            return
-        return window.active_view()
-
-    return sublime.active_window().active_view()
-
-
-def get_new_dict():
-    return deepcopy({WARNING: {}, ERROR: {}})
-
-
-def msg_count(l_dict):
-    w_count = len(l_dict.get("warning", []))
-    e_count = len(l_dict.get("error", []))
-    return w_count, e_count
-
-
-def any_key_in(target, source):
-    """Perform an m:n member check between two iterables."""
-    return any(key in target for key in source)
-
-
 # file/directory/environment utils
 
-def climb(start_dir, limit=None):
-    """
-    Generate directories, starting from start_dir.
 
-    If limit is None, stop at the root directory.
-    Otherwise return a maximum of limit directories.
-    """
-    right = True
-
-    while right and (limit is None or limit > 0):
-        yield start_dir
-        start_dir, right = os.path.split(start_dir)
-
-        if limit is not None:
-            limit -= 1
+@lru_cache(maxsize=1)  # print once every time the path changes
+def debug_print_env(path):
+    import textwrap
+    logger.info('PATH:\n{}'.format(textwrap.indent(path.replace(os.pathsep, '\n'), '    ')))
 
 
-@lru_cache(maxsize=None)
-def find_file(start_dir, name, parent=False, limit=None, aux_dirs=[]):
-    """
-    Find the given file by searching up the file hierarchy from start_dir.
-
-    If the file is found and parent is False, returns the path to the file.
-    If parent is True the path to the file's parent directory is returned.
-
-    If limit is None, the search will continue up to the root directory.
-    Otherwise a maximum of limit directories will be checked.
-
-    If aux_dirs is not empty and the file hierarchy search failed,
-    those directories are also checked.
-    """
-    for d in climb(start_dir, limit=limit):
-        target = os.path.join(d, name)
-
-        if os.path.exists(target):
-            if parent:
-                return d
-
-            return target
-
-    for d in aux_dirs:
-        d = os.path.expanduser(d)
-        target = os.path.join(d, name)
-
-        if os.path.exists(target):
-            if parent:
-                return d
-
-            return target
-
-
-def run_shell_cmd(cmd):
-    """Run a shell command and return stdout."""
-    proc = popen(cmd, env=os.environ)
-    from . import persist
-
-    try:
-        timeout = persist.settings.get('shell_timeout', 10)
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        out = b''
-        printf(
-            'shell timed out after {} seconds, executing {}'.format(timeout, cmd))
-
-    return out
-
-
-@lru_cache(maxsize=None)
-def get_environment_variable(name):
-    """Return the value of the given environment variable, or None if not found."""
-    if os.name == 'posix':
-        value = None
-
-        if 'SHELL' in os.environ:
-            shell_path = os.environ['SHELL']
-
-            # We have to delimit the output with markers because
-            # text might be output during shell startup.
-            out = run_shell_cmd(
-                (shell_path, '-l', '-c', 'echo "__SUBL_VAR__${{{}}}__SUBL_VAR__"'.format(name))).strip()
-
-            if out:
-                value = out.decode().split('__SUBL_VAR__', 2)[
-                    1].strip() or None
-    else:
-        value = os.environ.get(name, None)
-
-    from . import persist
-    persist.debug('ENV[\'{}\'] = \'{}\''.format(name, value))
-
-    return value
-
-
-@lru_cache(maxsize=None)
 def create_environment():
-    """
-    Return a dict with os.environ augmented with a better PATH.
+    """Return a dict with os.environ augmented with a better PATH.
 
-    On Posix systems, the user's shell PATH is added to PATH.
-
-    Platforms paths are then added to PATH by getting the
-    "paths" user settings for the current platform. If "paths"
-    has a "*" item, it is added to PATH on all platforms.
+    Platforms paths are added to PATH by getting the "paths" user settings
+    for the current platform.
     """
     from . import persist
 
@@ -262,29 +125,8 @@ def create_environment():
     if paths:
         env['PATH'] = os.pathsep.join(paths) + os.pathsep + env['PATH']
 
-    from . import persist
-
-    if persist.debug_mode():
-        if os.name == 'posix':
-            if 'SHELL' in env:
-                shell = 'using ' + env['SHELL']
-            else:
-                shell = 'using standard paths'
-        else:
-            shell = 'from system'
-
-        if env['PATH']:
-            printf('computed PATH {}:\n{}\n'.format(
-                shell, env['PATH'].replace(os.pathsep, '\n')))
-
-    # Many linters use stdin, and we convert text to utf-8
-    # before sending to stdin, so we have to make sure stdin
-    # in the target executable is looking for utf-8. Some
-    # linters (like ruby) need to have LANG and/or LC_CTYPE
-    # set as well.
-    env['PYTHONIOENCODING'] = 'utf8'
-    env['LANG'] = 'en_US.UTF-8'
-    env['LC_CTYPE'] = 'en_US.UTF-8'
+    if logger.isEnabledFor(logging.INFO) and env['PATH']:
+        debug_print_env(env['PATH'])
 
     return env
 
@@ -294,7 +136,6 @@ def can_exec(path):
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
 
-@lru_cache(maxsize=None)
 def which(cmd):
     """Return the full path to an executable searching PATH."""
     for path in find_executables(cmd):
@@ -321,32 +162,6 @@ def find_executables(executable):
             yield path
 
     return None
-
-
-@lru_cache(maxsize=None)
-def get_python_paths():
-    """
-    Return sys.path for the system version of python 3.
-
-    If python 3 cannot be found on the system, [] is returned.
-    """
-    from . import persist
-
-    python_path = which('@python3')[0]
-
-    if python_path:
-        code = r'import sys;print("\n".join(sys.path).strip())'
-        out = communicate(python_path, code)
-        paths = out.splitlines()
-
-        if persist.debug_mode():
-            printf('sys.path for {}:\n{}\n'.format(
-                python_path, '\n'.join(paths)))
-    else:
-        persist.debug('no python 3 available to augment sys.path')
-        paths = []
-
-    return paths
 
 
 # popen utils
@@ -376,13 +191,13 @@ def combine_output(out, sep=''):
     return ANSI_COLOR_RE.sub('', output)
 
 
-def communicate(cmd, code=None, output_stream=STREAM_STDOUT, env=None):
+def communicate(cmd, code=None, output_stream=STREAM_STDOUT, env=None, cwd=None):
     """
     Return the result of sending code via stdin to an executable.
 
     The result is a string which comes from stdout, stderr or the
     combining of the two, depending on the value of output_stream.
-    If env is not None, it is merged with the result of create_environment.
+    If env is None, the result of create_environment is used.
 
     """
     # On Windows, using subprocess.PIPE with Popen() is broken when not
@@ -401,7 +216,7 @@ def communicate(cmd, code=None, output_stream=STREAM_STDOUT, env=None):
         stdout = stderr = None
 
     out = popen(cmd, stdout=stdout, stderr=stderr,
-                output_stream=output_stream, extra_env=env)
+                output_stream=output_stream, env=env, cwd=cwd)
 
     if out is not None:
         if code is not None:
@@ -422,41 +237,7 @@ def communicate(cmd, code=None, output_stream=STREAM_STDOUT, env=None):
         return ''
 
 
-def create_tempdir():
-    """Create a directory within the system temp directory used to create temp files."""
-    try:
-        if os.path.isdir(tempdir):
-            shutil.rmtree(tempdir)
-
-        os.mkdir(tempdir)
-
-        # Make sure the directory can be removed by anyone in case the user
-        # runs ST later as another user.
-        os.chmod(tempdir, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-
-    except PermissionError:
-        if sublime.platform() != 'windows':
-            current_user = pwd.getpwuid(os.geteuid())[0]
-            temp_uid = os.stat(tempdir).st_uid
-            temp_user = pwd.getpwuid(temp_uid)[0]
-            message = (
-                'The SublimeLinter temp directory:\n\n{0}\n\ncould not be cleared '
-                'because it is owned by \'{1}\' and you are logged in as \'{2}\'. '
-                'Please use sudo to remove the temp directory from a terminal.'
-            ).format(tempdir, temp_user, current_user)
-        else:
-            message = (
-                'The SublimeLinter temp directory ({}) could not be reset '
-                'because it belongs to a different user.'
-            ).format(tempdir)
-
-        sublime.error_message(message)
-
-    from . import persist
-    persist.debug('temp directory:', tempdir)
-
-
-def tmpfile(cmd, code, filename, suffix='', output_stream=STREAM_STDOUT, env=None):
+def tmpfile(cmd, code, filename, suffix='', output_stream=STREAM_STDOUT, env=None, cwd=None):
     """
     Return the result of running an executable against a temporary file containing code.
 
@@ -464,87 +245,33 @@ def tmpfile(cmd, code, filename, suffix='', output_stream=STREAM_STDOUT, env=Non
     which is a filename to process.
 
     The result is a string combination of stdout and stderr.
-    If env is not None, it is merged with the result of create_environment.
+    If env is None, the result of create_environment is used.
     """
-    if not filename:
-        filename = "untitled"
-    else:
-        filename = os.path.basename(filename)
-
-    if suffix:
-        filename = os.path.splitext(filename)[0] + suffix
-
-    path = os.path.join(tempdir, filename)
+    file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    path = file.name
 
     try:
-        with open(path, mode='wb') as f:
-            if isinstance(code, str):
-                code = code.encode('utf-8')
-
-            f.write(code)
-            f.flush()
+        file.write(bytes(code, 'UTF-8'))
+        file.close()
 
         cmd = list(cmd)
 
-        if '@' in cmd:
+        if '${file}' in cmd:
+            cmd[cmd.index('${file}')] = filename
+
+        if '${temp_file}' in cmd:
+            cmd[cmd.index('${temp_file}')] = path
+        elif '@' in cmd:  # legacy SL3 crypto-identifier
             cmd[cmd.index('@')] = path
         else:
             cmd.append(path)
 
-        return communicate(cmd, output_stream=output_stream, env=env)
+        return communicate(cmd, output_stream=output_stream, env=env, cwd=cwd)
     finally:
         os.remove(path)
 
 
-def tmpdir(cmd, files, filename, code, output_stream=STREAM_STDOUT, env=None):
-    """
-    Run an executable against a temporary file containing code.
-
-    It is assumed that the executable launched by cmd can take one more argument
-    which is a filename to process.
-
-    Returns a string combination of stdout and stderr.
-    If env is not None, it is merged with the result of create_environment.
-    """
-    filename = os.path.basename(filename) if filename else ''
-    out = None
-
-    with tempfile.TemporaryDirectory(dir=tempdir) as d:
-        for f in files:
-            try:
-                os.makedirs(os.path.join(d, os.path.dirname(f)))
-            except OSError:
-                pass
-
-            target = os.path.join(d, f)
-
-            if os.path.basename(target) == filename:
-                # source file hasn't been saved since change, so update it from our live buffer
-                f = open(target, 'wb')
-
-                if isinstance(code, str):
-                    code = code.encode('utf8')
-
-                f.write(code)
-                f.close()
-            else:
-                shutil.copyfile(f, target)
-
-        os.chdir(d)
-        out = communicate(cmd, output_stream=output_stream, env=env)
-
-        if out:
-            # filter results from build to just this filename
-            # no guarantee all syntaxes are as nice about this as Go
-            # may need to improve later or just defer to communicate()
-            out = '\n'.join([
-                line for line in out.split('\n') if filename in line.split(':', 1)[0]
-            ])
-
-    return out or ''
-
-
-def popen(cmd, stdout=None, stderr=None, output_stream=STREAM_BOTH, env=None, extra_env=None):
+def popen(cmd, stdout=None, stderr=None, output_stream=STREAM_BOTH, env=None, cwd=None):
     """Open a pipe to an external process and return a Popen object."""
     info = None
 
@@ -566,9 +293,6 @@ def popen(cmd, stdout=None, stderr=None, output_stream=STREAM_BOTH, env=None, ex
     if env is None:
         env = create_environment()
 
-    if extra_env is not None:
-        env.update(extra_env)
-
     try:
         return subprocess.Popen(
             cmd,
@@ -576,30 +300,15 @@ def popen(cmd, stdout=None, stderr=None, output_stream=STREAM_BOTH, env=None, ex
             stdout=stdout,
             stderr=stderr,
             startupinfo=info,
-            env=env
+            env=env,
+            cwd=cwd,
         )
     except Exception as err:
-        printf('ERROR: could not launch', repr(cmd))
-        printf('reason:', str(err))
-        printf('PATH:', env.get('PATH', ''))
-
-
-# view utils
-
-def apply_to_all_views(callback):
-    """Apply callback to all views in all windows."""
-    for window in sublime.windows():
-        for view in window.views():
-            callback(view)
+        msg = 'could not launch ' + repr(cmd) + '\nReason: ' + str(err) + '\nPATH: ' + env.get('PATH', '')
+        logger.error(msg)
 
 
 # misc utils
-
-def clear_path_caches():
-    """Clear the caches of all path-related methods in this module that use an lru_cache."""
-    create_environment.cache_clear()
-    which.cache_clear()
-    get_python_paths.cache_clear()
 
 
 def convert_type(value, type_value, sep=None, default=None):
@@ -644,24 +353,15 @@ def convert_type(value, type_value, sep=None, default=None):
     return default
 
 
-class cd:
-    """Context manager for changing the current working directory."""
-
-    def __init__(self, newPath):
-        """Save the new wd."""
-        self.newPath = os.path.expanduser(newPath)
-
-    def __enter__(self):
-        """Save the old wd and change to the new wd."""
-        self.savedPath = os.getcwd()
-        os.chdir(self.newPath)
-
-    def __exit__(self, etype, value, traceback):
-        """Go back to the old wd."""
-        os.chdir(self.savedPath)
-
-
 def load_json(*segments, from_sl_dir=False):
-    base_path = "Packages/SublimeLinter" if from_sl_dir else ""
-    full_path = os.path.join(base_path, *segments)
+    base_path = "Packages/SublimeLinter/" if from_sl_dir else ""
+    full_path = base_path + "/".join(segments)
     return sublime.decode_value(sublime.load_resource(full_path))
+
+
+def get_sl_version():
+    try:
+        metadata = load_json("package-metadata.json", from_sl_dir=True)
+        return metadata.get("version")
+    except Exception:
+        return "unknown"

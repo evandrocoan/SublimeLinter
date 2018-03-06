@@ -1,22 +1,45 @@
 import sublime
 from . import persist, util
-from abc import ABCMeta, abstractmethod
-from .const import INBUILT_ICONS
 
+import logging
 import os
 
-GUTTER_ICONS = {}
+
+logger = logging.getLogger(__name__)
+linter_style_stores = {}
+COLORIZE = True
 
 
-class StyleBaseStore(metaclass=ABCMeta):
-    @abstractmethod
-    def update(cls):
-        pass
+def get_linter_style_store(name):
+    try:
+        return linter_style_stores[name]
+    except KeyError:
+        linter_style_stores[name] = store = LinterStyleStore(name)
+        return store
 
 
-class HighlightStyleStore(StyleBaseStore, util.Borg):
+def read_gutter_theme():
+    theme_path = persist.settings.get('gutter_theme')
+    theme_file = os.path.basename(theme_path)
+    global COLORIZE
+    COLORIZE = True
+
+    if not theme_file.endswith(".gutter-theme"):
+        theme_file += ".gutter-theme"
+
+    theme_files = sublime.find_resources(theme_file)
+
+    if theme_files:
+        theme_file = theme_files[0]
+        opts = util.load_json(theme_file)
+        if opts:
+            COLORIZE = opts.get("colorize", True)
+
+
+class HighlightStyleStore:
     styles = {}
 
+    @classmethod
     def update(self, name, dict):
         self.styles[name] = dict
 
@@ -30,26 +53,21 @@ class HighlightStyleStore(StyleBaseStore, util.Borg):
         def wrapper(*args):
             res = f(*args)
             key = args[1]
-            error_type = args[3]
 
             if not res:
-                util.printf("Styles are invalid. Please check your settings and restart Sublime Text.")
+                logger.error("Styles are invalid. Please check your settings and restart Sublime Text.")
                 return
 
             if key != "icon":
                 return res
             else:
-                # returning paths
-
-                if res in INBUILT_ICONS:
+                if res in ("circle", "dot", "bookmark", "none"):  # Sublime Text has some default icons
                     return res
                 elif res != os.path.basename(res):
                     return res
                 else:
-                    icon_path = GUTTER_ICONS["icons"].get(res)
-                    if icon_path:
-                        return icon_path
-                return GUTTER_ICONS["icons"][error_type]
+                    theme = persist.settings.get('gutter_theme')
+                    return 'Packages/SublimeLinter/gutter-themes/{}/{}.png'.format(theme, res)
 
         return wrapper
 
@@ -62,7 +80,7 @@ class HighlightStyleStore(StyleBaseStore, util.Borg):
         3. Default error type
         """
         # 1. Individual style definition.
-        y = self.styles.setdefault(style, {}).get(key)
+        y = self.styles.get(style, {}).get(key)
         if y:
             return y
 
@@ -90,7 +108,7 @@ class HighlightStyleStore(StyleBaseStore, util.Borg):
             return val
 
 
-class LinterStyleStore(StyleBaseStore):
+class LinterStyleStore:
     all_linter_styles = {}
     default_styles = {}
 
@@ -105,7 +123,7 @@ class LinterStyleStore(StyleBaseStore):
         self.linter_styles = self.all_linter_styles.get(linter_name, {})
 
     def traverse_dict(self, dict, error_type):
-        return dict.setdefault("types", {}).get(error_type)
+        return dict.get("types", {}).get(error_type)
 
     def get_default_style(self, error_type):
         """Return default style for error_type of this linter.
@@ -131,6 +149,11 @@ class LinterStyleStore(StyleBaseStore):
 
 class StyleParser:
     def __call__(self):
+        linter_style_stores.clear()
+        LinterStyleStore.all_linter_styles.clear()
+        LinterStyleStore.default_styles.clear()
+        HighlightStyleStore.styles.clear()
+
         rule_validities = []
 
         # 1 - for default styles
@@ -189,7 +212,7 @@ class StyleParser:
             for code in node.get("codes", []):
                 lint_dict["codes"][code] = rule_name
 
-            HighlightStyleStore().update(rule_name, style_dict)
+            HighlightStyleStore.update(rule_name, style_dict)
 
         LinterStyleStore.update(linter_name, lint_dict)
 

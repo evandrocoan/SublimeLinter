@@ -7,19 +7,33 @@
     "delay": 0.3,
 
     // Available gutter themes:
-    // Blueberry/Blueberry - cross.gutter-theme
-    // Blueberry/Blueberry - round.gutter-theme
+    // Blueberry Cross
+    // Blueberry Round
     // Circle
     // Danish Royalty
     // Default
     // Hands
-    // Knob/Knob - simple.gutter-theme
-    // Knob/Knob - symbol.gutter-theme
+    // Knob
+    // Knob Symbol
     // Koloria
     // ProjectIcons
     // Note that you may need to change the "icon" property in "styles"
     // to an icon in the theme (they usually include "warning" and "error")
     "gutter_theme": "none",
+
+    // EXPERIMENTAL: See below `demote_while_editing`.
+    "highlights.time_to_idle": 5,
+
+    // EXPERIMENTAL: One of 'none', 'ws_regions', 'warnings'
+    // Essentially picks a predicate fn from `highlights.py` to demote the
+    // visibility of some lint errors while editing (busy). These errors
+    // appear after `time_to_idle` seconds or immediately on save.
+    "highlights.demote_while_editing": "none",
+
+    // EXPERIMENTAL: A typical Sublime scope which gets applied to
+    // the regions while busy. Use the empty string to actually hide
+    // the regions. E.g. try 'comment' to get a soft gray.
+    "highlights.demote_scope": "",
 
     // Lint Modes determine when the linter is run
     // background: asynchronously on every change
@@ -28,6 +42,7 @@
     "lint_mode": "background",
 
     // Example of linter specific settings.
+    // Linter specific settings can also be changed in sublime-project settings.
     // What settings are available is documented in the readme of the
     // specific linter plugin.
     // "linters": {
@@ -49,7 +64,7 @@
     // }
     "linters": {},
 
-    // Determines what happens when a linter reports an error without column.
+    // Determines what happens when a linter reports a problem without column.
     // By default, a mark is put in the gutter but no text is highlighted.
     // If this setting is ``true``, the entire line is also highlighted.
     "no_column_highlights_line": false,
@@ -60,23 +75,28 @@
         "osx": [],
         "windows": []
     },
-    "python_paths": {
-        "linux": [],
-        "osx": [],
-        "windows": []
-    },
 
     // How much time we should be available for reading $PATH from the shell.
     "shell_timeout": 10,
 
-    // Show a report for errors on a line by hovering over the gutter.
+    // Show a report for problems on a line by hovering over the gutter.
     "show_hover_line_report": true,
 
-    // Show a report for errors on a region by hovering over it.
+    // Show a report for problems on a region by hovering over it.
     "show_hover_region_report": true,
 
-    // Highlight errors in the minimap.
+    // Highlight problems in the minimap.
     "show_marks_in_minimap": true,
+
+    // Display counters in the status bar.
+    // {warning} and {error} will be replaced with the actual numbers.
+    // Set to "" to display nothing
+    "statusbar.counters_template": "W: {warning} E: {error}",
+
+    // Show the messages for problems at your cursor position
+    // {message} will be replaced by the actual messages.
+    // Set to "" to display nothing
+    "statusbar.messages_template": "{messages}",
 
     // Global styles for all linters.
     // - mark_style options:
@@ -91,9 +111,12 @@
     // - codes is an array which can contain error codes provided by a linter.
     // - icon can be:
     //   one of the default icons: "circle", "dot" or "bookmark"
-    //   or one provided by a gutter theme (e.g. "warning" or "error")
     //   or a path to an icon file like (e.g. "Packages/icons/warning.png")
     //   or "none" to remove the icon
+    //   or one provided by a gutter theme (e.g. "warning" or "error")
+    //      in theme Default: "warning", "error", "cog", "x",
+    //      and "diamond", "heart", "pointer", "square", "star", "triangle" all
+    //      also have an -outline variant.
     // Note: At least one of those targets is required: types or codes.
     // Styles can also be specified per linter.
     "styles": [
@@ -118,6 +141,8 @@
     ],
 
     // Maps variant syntaxes to the syntax that you have a linter for.
+    // The syntax is the name of the syntax definition file, in lower case
+    // Run this in the console to find it: view.settings().get('syntax').lower()
     "syntax_map": {
         "html (django)": "html",
         "html (rails)": "html",

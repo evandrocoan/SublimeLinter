@@ -1,17 +1,13 @@
 language: python
 
 python:
-  - "3.3"
   - "3.6"
-
-matrix:
-  allow_failures:
-    - python: "3.6"
-  fast_finish: true
 
 install:
   - pip3 install flake8
   - pip3 install flake8-docstrings
+  - pip3 install Sphinx sphinx_rtd_theme
 
 script:
   - flake8
+  - sphinx-build docs docs-out

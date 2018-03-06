@@ -1,35 +1,35 @@
-.. include:: defines.inc
+Settings
+========
 
-.. _settings-stack:
+The settings are documented in the default settings file, so you can refer to
+them while editing your settings.
+
+This page covers some extra tricks and how to work with project specific settings.
 
 Settings stack
 --------------
-When |sl| (or a linter plugin) asks for a setting value, |sl| merges settings from several sources to calculate the value.
+SublimeLinter merges settings from several sources to calculate the value.
+Settings are merged in the following order:
 
-.. code-block:: none
+#. Default settings
+#. User settings
+#. Project settings
 
-    Default settings
-    User settings
-    Project settings
-
-
-Setting types
--------------
-There are three distinct types of settings:
-
-Global
-~~~~~~
-Global settings control |sl|’s behavior and apply to all views. Defaults for all global settings are defined in the |sl| default settings and may be modified with the user settings.
-
-Linter
-~~~~~~
-Linter settings apply only to a specific named linter. Linter settings are always defined within a ``"linters"`` object whose subobjects are named according to the lowercase class name of the linter. For an example, see the `user settings`_ sample below.
 
 Project settings
-~~~~~~~~~~~~~~~~
-|sl| project settings are defined by a ``"SublimeLinter"`` object within Sublime Text’s project settings. Here you can change linter settings for a project.
+----------------
+Only the "linters" settings in can be changed in a project.
+All other settings can only be changed in your user settings.
 
-Project settings are opened from the ``Project > Edit Project`` menu. Here is an example project settings file where the flake8 linter has been disabled:
+SublimeLinter project settings are defined by a ``"SublimeLinter"`` object
+within Sublime Text’s sublime-project file.
+
+.. note::
+
+    Read more about project setting in
+    `Sublime Text's documentation <https://www.sublimetext.com/docs/3/projects.html>`_.
+
+Here is an example project settings file where the flake8 linter has been disabled:
 
 .. code-block:: json
 
@@ -37,8 +37,7 @@ Project settings are opened from the ``Project > Edit Project`` menu. Here is an
         "folders":
         [
             {
-                "follow_symlinks": true,
-                "path": "/Users/aparajita/Projects/SublimeLinter"
+                "path": "."
             }
         ],
         "SublimeLinter":
@@ -54,72 +53,46 @@ Project settings are opened from the ``Project > Edit Project`` menu. Here is an
 
 .. note::
 
-    Be sure you are **not** putting the ``"SublimeLinter"`` object inside the ``settings`` object. They should be sibling objects in the root document.
+    Do not put the ``"SublimeLinter"`` object inside a ``"settings"`` object,
+    or anywhere else but directly in the root object of the sublime-project file.
 
 
-.. _settings-tokens:
+.. _settings-expansion:
 
-Setting tokens
---------------
-After the default, user and project settings are merged, SublimeLinter iterates over all settings values and replaces the following tokens with their current values:
+Settings Expansion
+------------------
+After the settings have been merged, SublimeLinter iterates over all settings values and expands any strings.
+This uses Sublime Text's `expand_variables` API,
+which uses the ``${varname}`` syntax and supports placeholders (``${varname:placeholder}``).
+Placeholders are resolved recursively (e.g. ``${XDG_CONFIG_HOME:$HOME/.config}``).
 
-=================== =========================================================================
-Token               Value
-=================== =========================================================================
-${sublime}          The full path to the Sublime Text packages directory
-${project}          The full path to the project’s parent directory, if available.
-${directory}        The full path to the parent directory of the current view’s file.
-${home}             The full path to the current user’s home directory.
-${env:x}            The environment variable 'x'.
-=================== =========================================================================
+To insert a literal ``$`` character, use ``\\$``.
 
-Please note:
+The following case-sensitive variables are provided:
 
-- Directory paths do **not** include a trailing directory separator.
+- ``packages``
+- ``platform``
+- ``file``
+- ``file_path``
+- ``file_name``
+- ``file_base_name``
+- ``file_extension``
+- ``folder``
+- ``project``
+- ``project_path``
+- ``project_name``
+- ``project_base_name``
+- ``project_extension``
+- all environment variables
 
-- ``${project}`` and ``${directory}`` expansion are dependent on a file being open in a window, and thus may not work when running lint reports.
+.. note::
 
-- The environment variables available to the ``${env:x}`` token are those available within the Sublime Text python context, which is a very limited subset of those available within a command line shell.
+    See the `documentation on build systems <https://www.sublimetext.com/docs/3/build_systems.html#variables>`_
+    for an explanation of what each variable contains.
 
-Project and parent directory paths are especially useful if you want to load specific configuration files for a linter.
-For example, you could use the ``${project}`` and ``${home}`` tokens in your project settings:
+We enhanced the expansion for ``folder``.
+It now attempts to guess the correct folder if you have multiple folders open in a window.
 
-.. code-block:: json
+Additionally, ``~`` will get expanded using
+`os.path.expanduser <https://docs.python.org/3/library/os.path.html#os.path.expanduser>`_.
 
-    {
-        "folders":
-        [
-            {
-                "follow_symlinks": true,
-                "path": "/Users/tinytim/Projects/Tulips"
-            }
-        ],
-        "SublimeLinter":
-        {
-            "linters":
-            {
-                "phpcs": {
-                    "standard": "${project}/build/phpcs/MyPHPCS"
-                },
-                "phpmd": {
-                    "args": ["${home}/phpmd-ruleset.xml"]
-                }
-            }
-        }
-    }
-
-After token replacement, SublimeLinter sees the linter settings as:
-
-.. code-block:: json
-
-    {
-        "linters":
-        {
-            "phpcs": {
-                "standard": "/Users/tinytim/Projects/Tulips/build/phpcs/MyPHPCS"
-            },
-            "phpmd": {
-                "args": ["/Users/tinytim/phpmd-ruleset.xml"]
-            }
-        }
-    }

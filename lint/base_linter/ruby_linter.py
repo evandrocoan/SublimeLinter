@@ -1,11 +1,16 @@
 """This module exports the RubyLinter subclass of Linter."""
 
+import logging
 import os
 import re
 import shlex
 import sublime
 
 from .. import linter, util
+
+
+logger = logging.getLogger(__name__)
+
 
 CMD_RE = re.compile(r'(?P<gem>.+?)@ruby')
 
@@ -22,30 +27,11 @@ class RubyLinter(linter.Linter):
     """
 
     @classmethod
-    def initialize(cls):
-        """Perform class-level initialization."""
-        super().initialize()
+    def can_lint(cls):
+        """Assume the linter can lint."""
+        return True
 
-        if cls.executable_path is not None:
-            return
-
-        if not callable(cls.cmd) and cls.cmd:
-            cls.executable_path = cls.lookup_executables(cls.cmd)
-        elif cls.executable:
-            cls.executable_path = cls.lookup_executables(cls.executable)
-
-        if not cls.executable_path:
-            cls.disabled = True
-
-    @classmethod
-    def reinitialize(cls):
-        """Perform class-level initialization after plugins have been loaded at startup."""
-        # Be sure to clear cls.executable_path so that lookup_executables will run.
-        cls.executable_path = None
-        cls.initialize()
-
-    @classmethod
-    def lookup_executables(cls, cmd):
+    def context_sensitive_executable_path(self, cmd):
         """
         Attempt to locate the gem and ruby specified in cmd, return new cmd list.
 
@@ -64,6 +50,12 @@ class RubyLinter(linter.Linter):
 
         Otherwise [ruby] or [gem] will be returned.
         """
+        # The default implementation will look for a user defined `executable`
+        # setting.
+        success, executable = super().context_sensitive_executable_path(cmd)
+        if success:
+            return success, executable
+
         ruby = None
         rbenv = util.which('rbenv')
 
@@ -77,11 +69,9 @@ class RubyLinter(linter.Linter):
             ruby = util.which('jruby')
 
         if not rbenv and not ruby:
-            util.printf(
-                'WARNING: {} deactivated, cannot locate ruby, rbenv or rvm-auto-ruby'
-                .format(cls.name, cmd[0])
-            )
-            return []
+            msg = '{} deactivated, cannot locate ruby, rbenv or rvm-auto-ruby'.format(self.name, cmd[0])
+            logger.warning(msg)
+            return True, None
 
         if isinstance(cmd, str):
             cmd = shlex.split(cmd)
@@ -103,29 +93,15 @@ class RubyLinter(linter.Linter):
                     ('{0}.rbenv{0}shims{0}'.format(os.sep) in gem_path or
                      (os.altsep and '{0}.rbenv{0}shims{0}'.format(os.altsep in gem_path)))):
                     ruby_cmd = [gem_path]
-                elif (sublime.platform() == 'windows'):
+                elif sublime.platform() == 'windows':
                     ruby_cmd = [gem_path]
                 else:
                     ruby_cmd = [ruby, gem_path]
             else:
-                util.printf(
-                    'WARNING: {} deactivated, cannot locate the gem \'{}\''
-                    .format(cls.name, gem)
-                )
-                return []
+                msg = '{} deactivated, cannot locate the gem \'{}\''.format(self.name, gem)
+                logger.warning(msg)
+                return True, None
         else:
             ruby_cmd = [ruby]
 
-        if cls.env is None:
-            # Don't use GEM_HOME with rbenv, it prevents it from using gem shims
-            if rbenv:
-                cls.env = {}
-            else:
-                gem_home = util.get_environment_variable('GEM_HOME')
-
-                if gem_home:
-                    cls.env = {'GEM_HOME': gem_home}
-                else:
-                    cls.env = {}
-
-        return ruby_cmd
+        return True, ruby_cmd

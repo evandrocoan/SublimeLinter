@@ -1,12 +1,12 @@
 """This module exports the NodeLinter subclass of Linter."""
 
+import codecs
 import json
 import hashlib
-import codecs
+import os
+
 import sublime
 
-from functools import lru_cache
-from os import path, access, X_OK
 from .. import linter, util
 
 
@@ -33,52 +33,7 @@ class NodeLinter(linter.Linter):
         self.manifest_path = self.get_manifest_path()
 
         if self.manifest_path:
-            self.read_manifest(path.getmtime(self.manifest_path))
-
-    def lint(self, hit_time):
-        """Check NodeLinter options then run lint."""
-        settings = self.get_view_settings()
-
-        if self.manifest_path:
-            is_dep = self.is_dependency()
-
-            enable_if_dependency = \
-                settings.get('enable_if_dependency', False)
-
-            disable_if_not_dependency = \
-                settings.get('disable_if_not_dependency', False)
-
-            if enable_if_dependency and is_dep:
-                self.disabled = False
-
-            if disable_if_not_dependency and not is_dep:
-                self.disabled = True
-
-        super(NodeLinter, self).lint(hit_time)
-
-    def is_dependency(self):
-        """Check package.json to see if linter is a dependency."""
-        is_dep = False
-
-        pkg = self.get_manifest()
-
-        # also return true if the name is the same so linters can lint their
-        # own code (e.g. eslint can lint the eslint project)
-        is_dep = 'name' in pkg and self.npm_name == pkg['name']
-
-        if not is_dep:
-            is_dep = True if (
-                'dependencies' in pkg and
-                self.npm_name in pkg['dependencies']
-            ) else False
-
-        if not is_dep:
-            is_dep = True if (
-                'devDependencies' in pkg and
-                self.npm_name in pkg['devDependencies']
-            ) else False
-
-        return is_dep
+            self.read_manifest(os.path.getmtime(self.manifest_path))
 
     def context_sensitive_executable_path(self, cmd):
         """
@@ -88,31 +43,39 @@ class NodeLinter(linter.Linter):
         looking in the global system node_modules folder. return
         a tuple of (have_path, path).
         """
-        local_cmd = None
-        global_cmd = util.which(cmd[0])
+        # The default implementation will look for a user defined `executable`
+        # setting.
+        success, executable = super().context_sensitive_executable_path(cmd)
+        if success:
+            return True, executable
 
         if self.manifest_path:
             local_cmd = self.find_local_cmd_path(cmd[0])
+            if local_cmd:
+                return True, local_cmd
+            elif self.get_view_settings().get('disable_if_not_dependency', False):
+                util.printf(
+                    "Disabled {}. Did you `npm install {}`?."
+                    .format(self.name, cmd[0]))
+                return True, None
 
-        if not local_cmd and not global_cmd:
+        global_cmd = util.which(cmd[0])
+        if global_cmd:
+            return True, global_cmd
+        else:
+            msg = 'WARNING: {} cannot locate \'{}\''.format(self.name, cmd[0])
+            util.printf(msg)
+            util.message(msg)
             return True, None
-
-        node_cmd_path = local_cmd if local_cmd else global_cmd
-        return True, node_cmd_path
 
     def get_manifest_path(self):
         """Get the path to the package.json file for the current file."""
-        curr_file = self.view.file_name()
-
-        manifest_path = None
-
-        if curr_file:
-            cwd = path.dirname(curr_file)
-
-            if cwd:
-                manifest_path = self.rev_parse_manifest_path(cwd)
-
-        return manifest_path
+        filename = self.view.file_name()
+        cwd = (
+            os.path.dirname(filename) if filename else
+            self._guess_project_path(self.view.window(), filename)
+        )
+        return self.rev_parse_manifest_path(cwd) if cwd else None
 
     def rev_parse_manifest_path(self, cwd):
         """
@@ -122,15 +85,13 @@ class NodeLinter(linter.Linter):
         at a time checking if that directory contains a package.json
         file. If it does, return that directory.
         """
-        name = 'package.json'
-        manifest_path = path.normpath(path.join(cwd, name))
+        manifest_path = os.path.join(cwd, 'package.json')
+        bin_path = os.path.normpath(os.path.join(cwd, 'node_modules/.bin/'))
 
-        bin_path = path.join(cwd, 'node_modules/.bin/')
-
-        if path.isfile(manifest_path) and path.isdir(bin_path):
+        if os.path.isfile(manifest_path) and os.path.isdir(bin_path):
             return manifest_path
 
-        parent = path.normpath(path.join(cwd, '../'))
+        parent = os.path.dirname(cwd)
 
         if parent == '/' or parent == cwd:
             return None
@@ -144,28 +105,28 @@ class NodeLinter(linter.Linter):
         Given package.json filepath and a local binary to find,
         look in node_modules/.bin for that binary.
         """
-        cwd = path.dirname(self.manifest_path)
+        cwd = os.path.dirname(self.manifest_path)
 
         binary = self.get_pkg_bin_cmd(cmd)
 
         if binary:
-            return path.normpath(path.join(cwd, binary))
+            return os.path.normpath(os.path.join(cwd, binary))
 
         return self.find_ancestor_cmd_path(cmd, cwd)
 
     def find_ancestor_cmd_path(self, cmd, cwd):
         """Recursively check for command binary in ancestors' node_modules/.bin directories."""
-        node_modules_bin = path.normpath(path.join(cwd, 'node_modules/.bin/'))
+        node_modules_bin = os.path.normpath(os.path.join(cwd, 'node_modules/.bin/'))
 
-        binary = path.join(node_modules_bin, cmd)
+        binary = os.path.join(node_modules_bin, cmd)
 
-        if sublime.platform() == 'windows' and path.splitext(binary)[1] != '.cmd':
+        if sublime.platform() == 'windows' and os.path.splitext(binary)[1] != '.cmd':
             binary += '.cmd'
 
-        if binary and access(binary, X_OK):
+        if util.can_exec(binary):
             return binary
 
-        parent = path.normpath(path.join(cwd, '../'))
+        parent = os.path.dirname(cwd)
 
         if parent == '/' or parent == cwd:
             return None
@@ -189,7 +150,7 @@ class NodeLinter(linter.Linter):
 
     def get_manifest(self):
         """Load manifest file (package.json)."""
-        current_manifest_mtime = path.getmtime(self.manifest_path)
+        current_manifest_mtime = os.path.getmtime(self.manifest_path)
 
         if (current_manifest_mtime != self.cached_manifest_mtime and
                 self.hash_manifest() != self.cached_manifest_hash):
@@ -209,24 +170,6 @@ class NodeLinter(linter.Linter):
         return hashlib.sha1(f.read().encode('utf-8')).hexdigest()
 
     @classmethod
-    @lru_cache(maxsize=None)
-    def can_lint(cls, syntax):
-        """
-        Determine if the linter can handle the provided syntax.
-
-        This is an optimistic determination based on the linter's syntax alone.
-        """
-        can = False
-        syntax = syntax.lower()
-
-        if cls.syntax:
-            if isinstance(cls.syntax, (tuple, list)):
-                can = syntax in cls.syntax
-            elif cls.syntax == '*':
-                can = True
-            elif isinstance(cls.syntax, str):
-                can = syntax == cls.syntax
-            else:
-                can = cls.syntax.match(syntax) is not None
-
-        return can
+    def can_lint(cls):
+        """Assume the linter can lint."""
+        return True

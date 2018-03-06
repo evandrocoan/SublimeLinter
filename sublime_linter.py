@@ -1,20 +1,23 @@
 """This module provides the SublimeLinter plugin class and supporting methods."""
 
+from collections import defaultdict
+from functools import partial
+import logging
 import os
-import html
+import threading
 
 import sublime
 import sublime_plugin
 
+from . import log_handler
+from .lint import backend
 from .lint import events
-from .lint.linter import Linter
-from .lint import highlight
-from .lint.highlight import HighlightSet
-from .lint.queue import queue
+from .lint import queue
 from .lint import persist, util, style
-from .lint.error import ErrorStore
-from .lint.const import WARN_ERR
-from .panel import panel
+from .lint import reloader
+
+
+logger = logging.getLogger(__name__)
 
 
 def backup_old_settings():
@@ -40,28 +43,41 @@ def backup_old_settings():
 
 
 def plugin_loaded():
+    log_handler.install()
     backup_old_settings()
 
-    persist.plugin_is_loaded = True
+    try:
+        from package_control import events
+        if events.install('SublimeLinter'):
+            reloader.reload_linter_plugins()
+            return
+        elif events.post_upgrade('SublimeLinter'):
+            reloader.reload_everything()
+            return
+    except ImportError:
+        pass
+
+    persist.api_ready = True
     persist.settings.load()
-    persist.debug("debug mode: on")
-
+    logger.info("debug mode: on")
+    logger.info("version: " + util.get_sl_version())
+    style.read_gutter_theme()
     style.StyleParser()()
-
-    util.create_tempdir()
-
-    persist.errors = ErrorStore()
-
-    for linter in persist.linter_classes.values():
-        linter.initialize()
-
-    plugin = SublimeLinter.shared_plugin()
-    queue.start(plugin.lint)
 
     # Lint the visible views from the active window on startup
     if persist.settings.get("lint_mode") in ("background", "load_save"):
         for view in visible_views():
-            plugin.hit(view)
+            hit(view)
+
+
+def plugin_unloaded():
+    queue.unload()
+    persist.settings.unobserve()
+
+
+class SublimeLinterReloadCommand(sublime_plugin.WindowCommand):
+    def run(self):
+        reloader.reload_everything()
 
 
 def visible_views():
@@ -79,384 +95,185 @@ def visible_views():
             yield view
 
 
-class Listener:
+guard_check_linters_for_view = defaultdict(threading.Lock)
+buffer_syntaxes = {}
 
+
+class BackendController(sublime_plugin.EventListener):
     def on_modified_async(self, view):
+        if persist.settings.get('lint_mode') != 'background':
+            return
+
         if not util.is_lintable(view):
             return
 
-        if view.id() not in persist.view_linters:
-            syntax_changed = self.check_syntax(view)
-            if not syntax_changed:
-                return
-        else:
-            syntax_changed = False
-
-        if syntax_changed or persist.settings.get('lint_mode') == 'background':
-            self.hit(view)
+        hit(view)
 
     def on_activated_async(self, view):
+        # If the user changes the buffers syntax via the command palette,
+        # we get an 'activated' event right after. Since, it is very likely
+        # that the linters change as well, we 'hit' immediately for users
+        # convenience.
+        # We also use this instead of the `on_load_async` event as 'load'
+        # event, bc 'on_load' fires for preview buffers which is way too
+        # early. This fires a bit too often for 'load_save' mode but it is
+        # good enough.
+
+        if persist.settings.get('lint_mode') == 'manual':
+            return
+
         if not util.is_lintable(view):
             return
 
-        self.check_syntax(view)
-
-        view_id = view.id()
-        if view_id not in self.linted_views:
-            if view_id not in self.loaded_views:
-                self.on_new_async(view)
-
-            lint_mode = persist.settings.get('lint_mode')
-            if lint_mode in ('background', 'load_save'):
-                self.hit(view)
-
-    def on_new_async(self, view):
-        if not util.is_lintable(view):
-            return
-
-        vid = view.id()
-        self.loaded_views.add(vid)
-        self.view_syntax[vid] = util.get_syntax(view)
+        if has_syntax_changed(view):
+            hit(view)
 
     def on_post_save_async(self, view):
-        if not util.is_lintable(view):
+        if persist.settings.get('lint_mode') == 'manual':
             return
 
         # check if the project settings changed
         if view.window().project_file_name() == view.file_name():
-            self.lint_all_views()
-        else:
-            filename = os.path.basename(view.file_name())
-            if filename != "SublimeLinter.sublime-settings":
-                self.file_was_saved(view)
+            lint_all_views()
+            return
 
-    def on_pre_close(self, view):
         if not util.is_lintable(view):
             return
 
-        vid = view.id()
-        dicts = [
-            self.loaded_views,
-            self.linted_views,
-            self.view_syntax,
-            persist.errors,
-            persist.view_linters,
-            persist.views,
-            persist.last_hit_times
-        ]
-
-        for d in dicts:
-            if type(d) is set:
-                d.discard(vid)
-            else:
-                d.pop(vid, None)
+        hit(view)
 
-        queue.cleanup(vid)
-        panel.fill_panel(view.window(), update=True)
-
-    def on_hover(self, view, point, hover_zone):
-        """On mouse hover event hook.
-
-        Arguments:
-            view (View): The view which received the event.
-            point (Point): The text position where the mouse hovered
-            hover_zone (int): The context the event was triggered in
-        """
-        if hover_zone == sublime.HOVER_GUTTER:
-            if persist.settings.get('show_hover_line_report'):
-                SublimeLinter.shared_plugin().open_tooltip(view, point)
-
-        elif hover_zone == sublime.HOVER_TEXT:
-            if persist.settings.get('show_hover_region_report'):
-                SublimeLinter.shared_plugin().open_tooltip(view, point, True)
-
+    def on_pre_close(self, view):
+        bid = view.buffer_id()
+        buffers = []
+        for w in sublime.windows():
+            for v in w.views():
+                buffers.append(v.buffer_id())
 
-class SublimeLinter(sublime_plugin.EventListener, Listener):
-    shared_instance = None
-
-    @classmethod
-    def shared_plugin(cls):
-        """Return the plugin instance."""
-        return cls.shared_instance
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # Keeps track of which views we have assigned linters to
-        self.loaded_views = set()
-
-        # Keeps track of which views have actually been linted
-        self.linted_views = set()
-
-        # A mapping between view ids and syntax names
-        self.view_syntax = {}
-
-        self.__class__.shared_instance = self
-
-    @classmethod
-    def lint_all_views(cls):
-        """Simulate a modification of all views, which will trigger a relint."""
-        def apply(view):
-            if view.id() in persist.view_linters:
-                cls.shared_instance.hit(view)
-
-        util.apply_to_all_views(apply)
-
-    def lint(self, view_id, hit_time=None, callback=None):
-        """Lint the view with the given id.
-
-        This method is called asynchronously by queue.Daemon when a lint
-        request is pulled off the queue.
-
-        If provided, hit_time is the time at which the lint request was added
-        to the queue. It is used to determine if the view has been modified
-        since the lint request was queued. If so, the lint is aborted, since
-        another lint request is already in the queue.
-
-        callback is the method to call when the lint is finished. If not
-        provided, it defaults to highlight().
-        """
-        # If this is not the latest 'hit' we're processing abort early.
-        if hit_time and persist.last_hit_times.get(view_id, 0) > hit_time:
-            return
-
-        view = Linter.get_view(view_id)
-
-        if not view:
-            return
-
-        filename = view.file_name()
-        code = Linter.text(view)
-        callback = callback or self.highlight
-
-        events.broadcast(events.BEGIN_LINTING, {'buffer_id': view.buffer_id()})
-        Linter.lint_view(view, filename, code, hit_time, callback)
-
-    def highlight(self, view, linters, hit_time):
-        """
-        Highlight any errors found during a lint of the given view.
-
-        This method is called by Linter.lint_view after linting is finished.
-
-        linters is a list of the linters that ran. hit_time has the same meaning
-        as in lint(), and if the view was modified since the lint request was
-        made, this method aborts drawing marks.
+        # Cleanup bid-based stores if this is the last view on the buffer
+        if buffers.count(bid) <= 1:
+            persist.errors.pop(bid, None)
+            persist.view_linters.pop(bid, None)
 
-        If the view has not been modified since hit_time, all of the marks and
-        errors from the list of linters are aggregated and drawn, and the status is updated.
-        """
-        if not view:
-            return
-
-        vid = view.id()
-
-        # If the view has been modified since the lint was triggered,
-        # don't draw marks.
-        if hit_time and persist.last_hit_times.get(vid, 0) > hit_time:
-            return
-
-        errors = {}
-        highlights = HighlightSet()
-
-        for linter in linters:
-            if linter.highlight:
-                highlights.add(linter.highlight)
-
-            if linter.errors:
-                for line, errs in linter.errors.items():
-                    l_err = errors.setdefault(line, {})
-                    for err_t in WARN_ERR:
-                        l_err.setdefault(err_t, []).extend(errs.get(err_t, []))
-
-        buffer_id = view.buffer_id()
-
-        for window in sublime.windows():
-            for other_view in window.views():
-                if other_view.buffer_id() == buffer_id:
-                    vid = other_view.id()
-                    highlight.clear_view(other_view)
-                    highlights.draw(other_view)
-                    persist.errors[vid] = errors
-
-            panel.fill_panel(window, update=True)
-
-        events.broadcast(events.FINISHED_LINTING, {'buffer_id': view.buffer_id()})
-
-    def hit(self, view):
-        """Record an activity that could trigger a lint and enqueue a desire to lint."""
-        if not view:
-            return
-
-        vid = view.id()
-        self.check_syntax(view)
-        self.linted_views.add(vid)
-
-        if view.size() == 0:
-            for linter in Linter.get_linters(vid):
-                linter.clear()
-            return
-
-        persist.last_hit_times[vid] = queue.hit(view)
-
-    def check_syntax(self, view):
-        """
-        Check and return if view's syntax has changed.
-
-        If the syntax has changed, a new linter is assigned.
-        """
-        if not view:
-            return
-
-        vid = view.id()
-        syntax = util.get_syntax(view)
-
-        # Syntax either has never been set or just changed
-        if vid not in self.view_syntax or self.view_syntax[vid] != syntax:
-            self.view_syntax[vid] = syntax
-            Linter.assign(view, reset=True)
-            self.clear(view)
-            return True
-        else:
-            return False
-
-    def clear(self, view):
-        Linter.clear_view(view)
-
-    def view_has_file_only_linter(self, vid):
-        """Return True if any linters for the given view are file-only."""
-        for lint in persist.view_linters.get(vid, []):
-            if lint.tempfile_suffix == '-':
-                return True
-
-        return False
-
-    def get_line_and_col(self, view):
-        try:
-            lineno, colno = view.rowcol(view.sel()[0].begin())
-        except IndexError:
-            lineno, colno = -1, -1
-
-        return lineno, colno
-
-    @classmethod
-    def join_msgs(cls, line_dict, we_count, show_count=False):
-
-        if show_count:
-            part = '''
-                <div class="{classname}">{count} {heading}</div>
-                <div>{messages}</div>
-            '''
-        else:
-            part = '''
-                <div>{messages}</div>
-            '''
-
-        template = "{linter}: {code} - {escaped_msg}"
-        template_no_code = "{linter}: {escaped_msg}"
-
-        all_msgs = ""
-        for error_type in WARN_ERR:
-            count = we_count[error_type]
-            heading = error_type
-            error_type_msgs = []
-            msg_list = line_dict.get(error_type)
-
-            if not msg_list:
-                continue
-            for item in msg_list:
-                item["escaped_msg"] = html.escape(item["msg"], quote=False)
-                template_to_fill = template if item.get('code') else template_no_code
-                error_type_msgs.append(template_to_fill.format(**item))
-
-            if count > 1:  # pluralize
-                heading += "s"
-
-            all_msgs += part.format(
-                classname=error_type,
-                count=count,
-                heading=heading,
-                messages='<br />'.join(error_type_msgs)
-            )
-        return all_msgs
-
-    def open_tooltip(self, active_view=None, point=None, is_inline=False):
-        """Show a tooltip containing all linting errors on a given line."""
-        stylesheet = '''
-            body {
-                word-wrap: break-word;
-            }
-            .error {
-                color: var(--redish);
-                font-weight: bold;
-            }
-            .warning {
-                color: var(--yellowish);
-                font-weight: bold;
-            }
-        '''
-
-        template = '''
-            <body id="sublimelinter-tooltip">
-                <style>{stylesheet}</style>
-                <div>{message}</div>
-            </body>
-        '''
-
-        if not active_view:
-            active_view = util.get_active_view()
-
-        # Leave any existing popup open without replacing it
-        # don't let the popup flicker / fight with other packages
-        if active_view.is_popup_visible():
-            return
-
-        if point:  # provided from hover
-            lineno, colno = active_view.rowcol(point)
-        else:
-            lineno, colno = self.get_line_and_col(active_view)
-
-        vid = active_view.id()
-
-        line_dict = persist.errors.get_line_dict(vid, lineno)
-        if not line_dict:
-            return
-
-        if is_inline:  # do not show tooltip on hovering empty gutter
-            line_dict = persist.errors.get_region_dict(vid, lineno, colno)
-            show_count = False
-        else:
-            show_count = True
-
-        if not line_dict:
-            return
-
-        we_count = persist.errors.get_we_count_line(vid, lineno)
-
-        if util.is_none_or_zero(we_count):
-            return
-
-        tooltip_message = self.join_msgs(line_dict, we_count, show_count)
-        if not tooltip_message:
-            return
-
-        colno = 0 if not is_inline else colno
-        location = active_view.text_point(lineno, colno)
-        active_view.show_popup(
-            template.format(stylesheet=stylesheet, message=tooltip_message),
-            flags=sublime.HIDE_ON_MOUSE_MOVE_AWAY,
-            location=location,
-            max_width=1000
+            guard_check_linters_for_view.pop(bid, None)
+            buffer_syntaxes.pop(bid, None)
+            queue.cleanup(bid)
+
+
+def has_syntax_changed(view):
+    bid = view.buffer_id()
+    current_syntax = util.get_syntax(view)
+
+    try:
+        old_value = buffer_syntaxes[bid]
+    except KeyError:
+        return True
+    else:
+        return old_value != current_syntax
+    finally:
+        buffer_syntaxes[bid] = current_syntax
+
+
+def lint_all_views():
+    """Mimic a modification of all views, which will trigger a relint."""
+    for window in sublime.windows():
+        for view in window.views():
+            if view.buffer_id() in persist.view_linters:
+                hit(view)
+
+
+def hit(view):
+    """Record an activity that could trigger a lint and enqueue a desire to lint."""
+    bid = view.buffer_id()
+
+    lock = guard_check_linters_for_view[bid]
+    view_has_changed = make_view_has_changed_fn(view)
+    fn = partial(lint, view, view_has_changed, lock)
+    queue.debounce(fn, key=bid)
+
+
+def lint(view, view_has_changed, lock):
+    """Lint the view with the given id.
+
+    This method is called asynchronously by queue.Daemon when a lint
+    request is pulled off the queue.
+    """
+    if view_has_changed():  # abort early
+        return
+
+    bid = view.buffer_id()
+
+    # We're already debounced, so races are actually unlikely
+    with lock:
+        linters = get_linters_for_view(view)
+
+    if linters:
+        events.broadcast(events.LINT_START, {'buffer_id': bid})
+
+        next = partial(update_buffer_errors, bid, view_has_changed)
+        backend.lint_view(linters, view, view_has_changed, next)
+
+        events.broadcast(events.LINT_END, {'buffer_id': bid})
+
+
+def update_buffer_errors(bid, view_has_changed, linter, errors):
+    """Persist lint error changes and broadcast."""
+    if view_has_changed():  # abort early
+        return
+
+    all_errors = [error for error in persist.errors[bid]
+                  if error['linter'] != linter.name] + errors
+    persist.errors[bid] = all_errors
+
+    events.broadcast(events.LINT_RESULT, {
+        'buffer_id': bid,
+        'linter_name': linter.name,
+        'errors': errors
+    })
+
+
+def get_linters_for_view(view):
+    """Check and eventually instantiate linters for a view."""
+    bid = view.buffer_id()
+
+    linters = persist.view_linters.get(bid, set())
+    wanted_linter_classes = {
+        linter_class
+        for linter_class in persist.linter_classes.values()
+        if (
+            not linter_class.disabled and
+            linter_class.can_lint_view(view) and
+            linter_class.can_lint()
         )
+    }
+    current_linter_classes = {linter.__class__ for linter in linters}
 
-    def file_was_saved(self, view):
-        """Check if the syntax changed or if we need to show errors."""
-        syntax_changed = self.check_syntax(view)
-        vid = view.id()
-        mode = persist.settings.get('lint_mode')
+    if current_linter_classes != wanted_linter_classes:
+        unchanged_buffer = lambda: False  # noqa: E731
+        for linter in (current_linter_classes - wanted_linter_classes):
+            update_buffer_errors(bid, unchanged_buffer, linter, [])
 
-        if syntax_changed:
-            self.clear(view)
+        syntax = util.get_syntax(view)
+        logger.info("detected syntax: {}".format(syntax))
 
-        if mode != 'manual':
-            if vid in persist.view_linters or self.view_has_file_only_linter(vid):
-                self.hit(view)
+        linters = {
+            linter_class(view, syntax)
+            for linter_class in wanted_linter_classes
+        }
+        persist.view_linters[bid] = linters
+
+    return linters
+
+
+def make_view_has_changed_fn(view):
+    initial_change_count = view.change_count()
+
+    def view_has_changed():
+        changed = view.change_count() != initial_change_count
+        if changed:
+            persist.debug(
+                'Buffer {} inconsistent. Aborting lint.'
+                .format(view.buffer_id()))
+
+        return changed
+
+    return view_has_changed
