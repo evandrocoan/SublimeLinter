@@ -16,20 +16,57 @@
         },
         "highlights.demote_while_editing":{
             "type":"string",
-            "pattern":"^(none|ws_regions|warnings)$"
+            "enum":["none", "ws_regions", "warnings", "all"]
+        },
+        "kill_old_processes":{
+            "type":"boolean"
         },
         "highlights.demote_scope": {
             "type":"string"
         },
         "lint_mode":{
             "type":"string",
-            "pattern":"^(background|load_save|manual)$"
+            "enum":["background", "load_save", "manual", "save"]
         },
         "linters":{
             "type":"object",
             "additionalProperties":{
                 "type":"object",
                 "properties":{
+                    "args": {
+                        "type": ["array", "string"],
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "disable": {
+                        "type": "boolean"
+                    },
+                    "env":{
+                        "type": "object"
+                    },
+                    "executable": {
+                        "type": ["array", "string"],
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "excludes": {
+                        "type": ["array", "string"],
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "lint_mode":{
+                        "type":"string",
+                        "enum":["background", "load_save", "manual", "save"]
+                    },
+                    "selector": {
+                        "type": "string"
+                    },
+                    "working_dir": {
+                        "type": "string"
+                    },
                     "styles":{
                         "type":"array",
                         "items":{
@@ -37,7 +74,7 @@
                             "properties":{
                                 "mark_style":{
                                     "type":"string",
-                                    "pattern":"^(fill|outline|solid_underline|squiggly_underline|stippled_underline|none)$"
+                                    "enum":["fill", "outline", "solid_underline", "squiggly_underline", "stippled_underline", "none"]
                                 },
                                 "priority":{
                                     "type":"integer",
@@ -53,7 +90,7 @@
                                     "type":"array",
                                     "items":{
                                         "type":"string",
-                                        "pattern":"^(error|warning)$"
+                                        "enum": ["error", "warning"]
                                     },
                                     "minItems":1,
                                     "uniqueItems":true
@@ -67,9 +104,6 @@
                                     "uniqueItems":true
                                 }
                             },
-                            "required":[
-                                "scope"
-                            ],
                             "additionalProperties":false
                         }
                     }
@@ -91,6 +125,10 @@
         "show_marks_in_minimap":{
             "type":"boolean"
         },
+        "show_panel_on_save":{
+            "type":"string",
+            "enum": ["never", "view", "window"]
+        },
         "syntax_map":{
             "type":"object"
         },
@@ -100,6 +138,9 @@
         "statusbar.messages_template":{
             "type":"string"
         },
+        "statusbar.show_active_linters":{
+            "type":"boolean"
+        },
         "styles":{
             "type":"array",
             "items":{
@@ -107,14 +148,20 @@
                 "properties":{
                     "mark_style":{
                         "type":"string",
-                        "pattern":"^(fill|outline|solid_underline|squiggly_underline|stippled_underline|none)$"
+                        "enum":["fill", "outline", "solid_underline", "squiggly_underline", "stippled_underline", "none"]
                     },
                     "priority":{
                         "type":"integer",
                         "minimum":0
                     },
                     "scope":{
-                        "type":"string"
+                        "type":"string",
+                        "examples": [
+                            "region.redish", "region.orangish",
+                            "region.yellowish", "region.greenish",
+                            "region.bluish", "region.purplish",
+                            "region.pinkish",
+                            "markup.warning", "markup.error"]
                     },
                     "icon":{
                         "type":"string"
@@ -123,19 +170,12 @@
                         "type":"array",
                         "items":{
                             "type":"string",
-                            "pattern":"^(error|warning)$"
+                            "enum": ["error", "warning"]
                         },
                         "minItems":1,
                         "uniqueItems":true
                     }
                 },
-                "required":[
-                    "mark_style",
-                    "priority",
-                    "scope",
-                    "icon",
-                    "types"
-                ],
                 "additionalProperties":false
             }
         }

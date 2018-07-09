@@ -1,6 +1,6 @@
 """This module provides general utility methods."""
 
-from functools import lru_cache
+from functools import lru_cache, wraps
 import locale
 import logging
 from numbers import Number
@@ -8,7 +8,6 @@ import os
 import re
 import sublime
 import subprocess
-import tempfile
 
 
 logger = logging.getLogger(__name__)
@@ -29,14 +28,52 @@ def printf(*args):
     print()
 
 
-def message(message):
-    window = sublime.active_window()
+def show_message(message, window=None):
+    if window is None:
+        window = sublime.active_window()
     window.run_command("sublime_linter_display_panel", {"msg": message})
 
 
 def clear_message():
     window = sublime.active_window()
     window.run_command("sublime_linter_remove_panel")
+
+
+def distinct_until_buffer_changed(method):
+    # Sublime has problems to hold the distinction between buffers and views.
+    # It usually emits multiple identical events if you have multiple views
+    # into the same buffer.
+    last_call = None
+
+    @wraps(method)
+    def wrapper(self, view):
+        nonlocal last_call
+
+        this_call = (view.buffer_id(), view.change_count())
+        if this_call == last_call:
+            return
+
+        last_call = this_call
+        method(self, view)
+
+    return wrapper
+
+
+def distinct_until_selection_changed(method):
+    last_call = None
+
+    @wraps(method)
+    def wrapper(self, view):
+        nonlocal last_call
+
+        this_call = (view.buffer_id(),) + tuple(s for s in view.sel())
+        if this_call == last_call:
+            return
+
+        last_call = this_call
+        method(self, view)
+
+    return wrapper
 
 
 def get_syntax(view):
@@ -84,14 +121,16 @@ def is_lintable(view):
         view.settings().get('is_widget')
     ):
         return False
-    elif (
-        view.file_name() and
-        view.file_name().startswith(sublime.packages_path() + os.path.sep) and
-        not os.path.exists(view.file_name())
+
+    filename = view.file_name()
+    if (
+        filename and
+        filename.startswith(sublime.packages_path() + os.path.sep) and
+        not os.path.exists(filename)
     ):
         return False
-    else:
-        return True
+
+    return True
 
 
 # file/directory/environment utils
@@ -166,6 +205,99 @@ def find_executables(executable):
 
 # popen utils
 
+def check_output(cmd, cwd=None):
+    """Short wrapper around subprocess.check_output."""
+    logger.info('Running `{}`'.format(' '.join(cmd)))
+    env = create_environment()
+
+    try:
+        output = subprocess.check_output(
+            cmd, env=env, cwd=cwd,
+            stderr=subprocess.STDOUT,
+            startupinfo=create_startupinfo()
+        )
+    except Exception as err:
+        logger.warning(
+            "Executing `{}` failed\n  {}".format(' '.join(cmd), str(err))
+        )
+        return ''
+    else:
+        return process_popen_output(output)
+
+
+def communicate(cmd, code=None, output_stream=STREAM_STDOUT, env=None, cwd=None):
+    """
+    Return the result of sending code via stdin to an executable.
+
+    The result is a string which comes from stdout, stderr or the
+    combining of the two, depending on the value of output_stream.
+    If env is None, the result of create_environment is used.
+
+    """
+    logger.warning('`util.communicate` has been deprecated.')
+
+    if code is not None:
+        code = code.encode('utf8')
+    if env is None:
+        env = create_environment()
+
+    uses_stdin = code is not None
+
+    try:
+        proc = subprocess.Popen(
+            cmd, env=env, cwd=cwd,
+            stdin=subprocess.PIPE if uses_stdin else None,
+            stdout=subprocess.PIPE if output_stream & STREAM_STDOUT else None,
+            stderr=subprocess.PIPE if output_stream & STREAM_STDERR else None,
+            startupinfo=create_startupinfo()
+        )
+    except Exception as err:
+        logger.error('  Execution failed\n\n  {}\n  {}{}'.format(
+            str(err),
+            ' '.join(cmd),
+            '\n  {}'.format(cwd) if cwd else ''
+        ))
+
+        return ''
+
+    if logger.isEnabledFor(logging.INFO):
+        logger.info('Running `{}`'.format(' '.join(cmd)))
+
+    out = proc.communicate(code)
+    return popen_output(proc, *out)
+
+
+class popen_output(str):
+    """Hybrid of a Popen process and its output.
+
+    Small compatibility layer: It is both the decoded output
+    as str and partially the Popen object.
+    """
+
+    def __new__(cls, proc, stdout, stderr):
+        if stdout is not None:
+            stdout = process_popen_output(stdout)
+        if stderr is not None:
+            stderr = process_popen_output(stderr)
+
+        combined_output = ''.join(filter(None, [stdout, stderr]))
+
+        rv = super().__new__(cls, combined_output)
+        rv.combined_output = combined_output
+        rv.stdout = stdout
+        rv.stderr = stderr
+        rv.proc = proc
+        rv.pid = proc.pid
+        rv.returncode = proc.returncode
+        return rv
+
+
+def process_popen_output(output):
+    # bytes -> string   --> universal newlines
+    output = decode(output).replace('\r\n', '\n').replace('\r', '\n')
+    return ANSI_COLOR_RE.sub('', output)
+
+
 def decode(bytes):
     """
     Decode and return a byte string using utf8, falling back to system's encoding if that fails.
@@ -184,128 +316,21 @@ def decode(bytes):
         return bytes.decode(locale.getpreferredencoding(), errors='replace')
 
 
-def combine_output(out, sep=''):
-    """Return stdout and/or stderr combined into a string, stripped of ANSI colors."""
-    output = sep.join((decode(out[0]), decode(out[1])))
-
-    return ANSI_COLOR_RE.sub('', output)
-
-
-def communicate(cmd, code=None, output_stream=STREAM_STDOUT, env=None, cwd=None):
-    """
-    Return the result of sending code via stdin to an executable.
-
-    The result is a string which comes from stdout, stderr or the
-    combining of the two, depending on the value of output_stream.
-    If env is None, the result of create_environment is used.
-
-    """
-    # On Windows, using subprocess.PIPE with Popen() is broken when not
-    # sending input through stdin. So we use temp files instead of a pipe.
-    if code is None and os.name == 'nt':
-        if output_stream != STREAM_STDERR:
-            stdout = tempfile.TemporaryFile()
-        else:
-            stdout = None
-
-        if output_stream != STREAM_STDOUT:
-            stderr = tempfile.TemporaryFile()
-        else:
-            stderr = None
-    else:
-        stdout = stderr = None
-
-    out = popen(cmd, stdout=stdout, stderr=stderr,
-                output_stream=output_stream, env=env, cwd=cwd)
-
-    if out is not None:
-        if code is not None:
-            code = code.encode('utf8')
-
-        out = out.communicate(code)
-
-        if code is None and os.name == 'nt':
-            out = list(out)
-
-            for f, index in ((stdout, 0), (stderr, 1)):
-                if f is not None:
-                    f.seek(0)
-                    out[index] = f.read()
-
-        return combine_output(out)
-    else:
-        return ''
-
-
-def tmpfile(cmd, code, filename, suffix='', output_stream=STREAM_STDOUT, env=None, cwd=None):
-    """
-    Return the result of running an executable against a temporary file containing code.
-
-    It is assumed that the executable launched by cmd can take one more argument
-    which is a filename to process.
-
-    The result is a string combination of stdout and stderr.
-    If env is None, the result of create_environment is used.
-    """
-    file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    path = file.name
-
-    try:
-        file.write(bytes(code, 'UTF-8'))
-        file.close()
-
-        cmd = list(cmd)
-
-        if '${file}' in cmd:
-            cmd[cmd.index('${file}')] = filename
-
-        if '${temp_file}' in cmd:
-            cmd[cmd.index('${temp_file}')] = path
-        elif '@' in cmd:  # legacy SL3 crypto-identifier
-            cmd[cmd.index('@')] = path
-        else:
-            cmd.append(path)
-
-        return communicate(cmd, output_stream=output_stream, env=env, cwd=cwd)
-    finally:
-        os.remove(path)
-
-
-def popen(cmd, stdout=None, stderr=None, output_stream=STREAM_BOTH, env=None, cwd=None):
-    """Open a pipe to an external process and return a Popen object."""
-    info = None
-
+def create_startupinfo():
     if os.name == 'nt':
         info = subprocess.STARTUPINFO()
         info.dwFlags |= subprocess.STARTF_USESTDHANDLES | subprocess.STARTF_USESHOWWINDOW
         info.wShowWindow = subprocess.SW_HIDE
+        return info
 
-    if output_stream == STREAM_BOTH:
-        stdout = stdout or subprocess.PIPE
-        stderr = stderr or subprocess.PIPE
-    elif output_stream == STREAM_STDOUT:
-        stdout = stdout or subprocess.PIPE
-        stderr = subprocess.DEVNULL
-    else:  # STREAM_STDERR
-        stdout = subprocess.DEVNULL
-        stderr = stderr or subprocess.PIPE
+    return None
 
-    if env is None:
-        env = create_environment()
 
-    try:
-        return subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=stdout,
-            stderr=stderr,
-            startupinfo=info,
-            env=env,
-            cwd=cwd,
-        )
-    except Exception as err:
-        msg = 'could not launch ' + repr(cmd) + '\nReason: ' + str(err) + '\nPATH: ' + env.get('PATH', '')
-        logger.error(msg)
+def get_creationflags():
+    if os.name == 'nt':
+        return subprocess.CREATE_NEW_PROCESS_GROUP
+
+    return 0
 
 
 # misc utils

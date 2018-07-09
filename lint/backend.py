@@ -1,52 +1,38 @@
 import sublime
 
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-from fnmatch import fnmatch
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_EXCEPTION
+from contextlib import contextmanager
 from itertools import chain, count
 from functools import partial
+import hashlib
+import json
 import logging
+import multiprocessing
 import os
+import time
 import threading
 
-from . import util
+from . import style, util, linter as linter_module
 
 
 logger = logging.getLogger(__name__)
 
 WILDCARD_SYNTAX = '*'
+MAX_CONCURRENT_TASKS = multiprocessing.cpu_count() or 1
 
 
 task_count = count(start=1)
 counter_lock = threading.Lock()
+process_limit = threading.BoundedSemaphore(MAX_CONCURRENT_TASKS)
 
 
 def lint_view(linters, view, view_has_changed, next):
-    """
-    Lint the given view.
+    """Lint the given view.
 
     This is the top level lint dispatcher. It is called
-    asynchronously. The following checks are done for each linter
-    assigned to the view:
-
-    - Check if the linter has been disabled in settings.
-    - Check if the filename matches any patterns in the "excludes" setting.
-
-    If a linter fails the checks, it is disabled for this run.
-    Otherwise, if the mapped syntax is not in the linter's selectors,
-    the linter is run on the entirety of code.
-
-    Then the set of selectors for all linters assigned to the view is
-    aggregated, and for each selector, if it occurs in sections,
-    the corresponding section is linted as embedded code.
+    asynchronously.
     """
-    enabled_linters, disabled_linters = filter_linters(linters, view)
-
-    # The contract here is that we MUST fire 'updates' for every linter, so
-    # that the views (status bar etc) actually update.
-    for linter in disabled_linters:
-        next(linter, [])
-
-    lint_tasks = get_lint_tasks(enabled_linters, view, view_has_changed)
+    lint_tasks = get_lint_tasks(linters, view, view_has_changed)
 
     run_concurrently(
         partial(run_tasks, tasks, next=partial(next, linter))
@@ -56,6 +42,9 @@ def lint_view(linters, view, view_has_changed, next):
 
 def run_tasks(tasks, next):
     results = run_concurrently(tasks)
+    if results is None:
+        return  # ABORT
+
     errors = list(chain.from_iterable(results))  # flatten and consume
 
     # We don't want to guarantee that our consumers/views are thread aware.
@@ -65,7 +54,7 @@ def run_tasks(tasks, next):
 
 
 def get_lint_tasks(linters, view, view_has_changed):
-    for (linter, settings, regions) in get_lint_regions(linters, view):
+    for (linter, regions) in get_lint_regions(linters, view):
         tasks = []
         for region in regions:
             code = view.substr(region)
@@ -73,64 +62,111 @@ def get_lint_tasks(linters, view, view_has_changed):
 
             # Due to a limitation in python 3.3, we cannot 'name' a thread when
             # using the ThreadPoolExecutor. (This feature has been introduced
-            # in python 3.6.) So, we pass the name down.
-            with counter_lock:
-                task_number = next(task_count)
-            canonical_filename = (
-                os.path.basename(view.file_name()) if view.file_name()
-                else '<untitled {}>'.format(view.buffer_id()))
-            task_name = 'LintTask|{}|{}|{}'.format(
-                task_number, linter.name, canonical_filename)
+            # in python 3.6.) So, we do this manually.
+            task_name = make_good_task_name(linter, view)
+            task = partial(execute_lint_task, linter, code, offset, view_has_changed)
+            executor = partial(modify_thread_name, task_name, task)
+            tasks.append(executor)
 
-            tasks.append(partial(
-                execute_lint_task, linter, code, offset, view_has_changed,
-                settings, task_name
-            ))
         yield linter, tasks
 
 
-def execute_lint_task(linter, code, offset, view_has_changed, settings, task_name):
-    try:
-        # We 'name' our threads, for logging purposes.
-        threading.current_thread().name = task_name
+def make_good_task_name(linter, view):
+    with counter_lock:
+        task_number = next(task_count)
 
-        errors = linter.lint(code, view_has_changed, settings) or []
-        translate_lineno_and_column(errors, offset)
+    canonical_filename = (
+        os.path.basename(view.file_name()) if view.file_name()
+        else '<untitled {}>'.format(view.buffer_id()))
+
+    return 'LintTask|{}|{}|{}|{}'.format(
+        task_number, linter.name, canonical_filename, view.id())
+
+
+def modify_thread_name(name, sink):
+    original_name = threading.current_thread().name
+    # We 'name' our threads, for logging purposes.
+    threading.current_thread().name = name
+    try:
+        return sink()
+    finally:
+        threading.current_thread().name = original_name
+
+
+@contextmanager
+def reduced_concurrency():
+    start_time = time.time()
+    with process_limit:
+        end_time = time.time()
+        waittime = end_time - start_time
+        if waittime > 0.1:
+            logger.warning('Waited in queue for {:.2f}s'.format(waittime))
+
+        yield
+
+
+@reduced_concurrency()
+def execute_lint_task(linter, code, offset, view_has_changed):
+    try:
+        errors = linter.lint(code, view_has_changed) or []
+        finalize_errors(linter, errors, offset)
 
         return errors
-    except BaseException:
+    except linter_module.TransientError:
+        raise  # Raise here to abort in `await_futures` below
+    except Exception:
+        linter.notify_failure()
         # Log while multi-threaded to get a nicer log message
-        logger.exception('Linter crashed.\n\n')
+        logger.exception('Unhandled exception:\n', extra={'demote': True})
         return []  # Empty list here to clear old errors
 
 
-def translate_lineno_and_column(errors, offset):
-    if offset == (0, 0):
-        return
-
+def finalize_errors(linter, errors, offset):
+    linter_name = linter.name
+    view = linter.view
     line_offset, col_offset = offset
 
     for error in errors:
-        line = error['line']
-        error['line'] = line + line_offset
-
+        line, start, end = error['line'], error['start'], error['end']
         if line == 0:
-            error.update({
-                'start': error['start'] + col_offset,
-                'end': error['end'] + col_offset
-            })
+            start += col_offset
+            end += col_offset
+
+        line += line_offset
+
+        error.update({
+            'line': line,
+            'start': start,
+            'end': end,
+            'linter': linter_name
+        })
+
+        uid = hashlib.sha256(
+            json.dumps(error, sort_keys=True).encode('utf-8')).hexdigest()
+
+        line_start = view.text_point(line, 0)
+        region = sublime.Region(line_start + start, line_start + end)
+        if len(region) == 0:
+            region.b = region.b + 1
+
+        error.update({
+            'uid': uid,
+            'region': region,
+            'priority': style.get_value('priority', error, 0)
+        })
 
 
 def get_lint_regions(linters, view):
     syntax = util.get_syntax(view)
-    for (linter, settings) in linters:
-        selector = settings.get('selector')
-        if selector:
+    for linter in linters:
+        settings = linter.get_view_settings()
+        selector = settings.get('selector', None)
+        if selector is not None:
             # Inspecting just the first char is faster
             if view.score_selector(0, selector):
-                yield linter, settings, [sublime.Region(0, view.size())]
+                yield linter, [sublime.Region(0, view.size())]
             else:
-                yield linter, settings, [
+                yield linter, [
                     region for region in view.find_by_selector(selector)
                 ]
 
@@ -141,10 +177,10 @@ def get_lint_regions(linters, view):
             syntax not in linter.selectors and
             WILDCARD_SYNTAX not in linter.selectors
         ):
-            yield linter, settings, [sublime.Region(0, view.size())]
+            yield linter, [sublime.Region(0, view.size())]
 
         else:
-            yield linter, settings, [
+            yield linter, [
                 region
                 for selector in get_selectors(linter, syntax)
                 for region in view.find_by_selector(selector)
@@ -159,59 +195,18 @@ def get_selectors(linter, wanted_syntax):
             pass
 
 
-def filter_linters(linters, view):
-    filename = view.file_name()
-
-    enabled, disabled = [], []
-    for linter in linters:
-        # First check to see if the linter can run in the current lint mode.
-        if linter.tempfile_suffix == '-' and view.is_dirty():
-            disabled.append(linter)
-            continue
-
-        view_settings = linter._get_view_settings()
-
-        if view_settings.get('disable'):
-            disabled.append(linter)
-            continue
-
-        if filename:
-            filename = os.path.realpath(filename)
-            excludes = util.convert_type(view_settings.get('excludes', []), [])
-
-            if excludes:
-                matched = False
-
-                for pattern in excludes:
-                    if fnmatch(filename, pattern):
-                        logger.info(
-                            '{} skipped \'{}\', excluded by \'{}\''
-                            .format(linter.name, filename, pattern)
-                        )
-                        matched = True
-                        break
-
-                if matched:
-                    disabled.append(linter)
-                    continue
-
-        enabled.append((linter, view_settings))
-
-    return enabled, disabled
-
-
-def run_concurrently(tasks, max_workers=5):
+def run_concurrently(tasks, max_workers=MAX_CONCURRENT_TASKS):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         work = [executor.submit(task) for task in tasks]
-        results = await_futures(work)
-        return list(results)  # consume the generator immediately
+        return await_futures(work)
 
 
-def await_futures(fs, ordered=False):
-    if ordered:
-        done, _ = wait(fs)
-    else:
-        done = as_completed(fs)
+def await_futures(fs):
+    done, not_done = wait(fs, return_when=FIRST_EXCEPTION)
 
-    for future in done:
-        yield future.result()
+    try:
+        return [future.result() for future in done]
+    except Exception:
+        for future in not_done:
+            future.cancel()
+        return None

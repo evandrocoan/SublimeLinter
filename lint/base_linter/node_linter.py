@@ -3,11 +3,14 @@
 import codecs
 import json
 import hashlib
+import logging
 import os
-
-import sublime
+import shutil
 
 from .. import linter, util
+
+
+logger = logging.getLogger(__name__)
 
 
 class NodeLinter(linter.Linter):
@@ -17,18 +20,11 @@ class NodeLinter(linter.Linter):
     Linters installed with npm should inherit from this class.
     By doing so, they automatically get the following features:
 
-    - Support for finding local binaries in a project's
-      ./node_modules/.bin/ folder. You need to override npm_name
-      variable to use this linter.
-
     """
-
-    # must be overridden by the linter
-    npm_name = None
 
     def __init__(self, view, syntax):
         """Initialize a new NodeLinter instance."""
-        super(NodeLinter, self).__init__(view, syntax)
+        super().__init__(view, syntax)
 
         self.manifest_path = self.get_manifest_path()
 
@@ -53,19 +49,15 @@ class NodeLinter(linter.Linter):
             local_cmd = self.find_local_cmd_path(cmd[0])
             if local_cmd:
                 return True, local_cmd
-            elif self.get_view_settings().get('disable_if_not_dependency', False):
-                util.printf(
-                    "Disabled {}. Did you `npm install {}`?."
-                    .format(self.name, cmd[0]))
-                return True, None
+
+        if self.get_view_settings().get('disable_if_not_dependency', False):
+            return True, None
 
         global_cmd = util.which(cmd[0])
         if global_cmd:
             return True, global_cmd
         else:
-            msg = 'WARNING: {} cannot locate \'{}\''.format(self.name, cmd[0])
-            util.printf(msg)
-            util.message(msg)
+            logger.warning('{} cannot locate \'{}\''.format(self.name, cmd[0]))
             return True, None
 
     def get_manifest_path(self):
@@ -73,7 +65,7 @@ class NodeLinter(linter.Linter):
         filename = self.view.file_name()
         cwd = (
             os.path.dirname(filename) if filename else
-            self._guess_project_path(self.view.window(), filename)
+            linter.guess_project_root_of_view(self.view)
         )
         return self.rev_parse_manifest_path(cwd) if cwd else None
 
@@ -118,12 +110,8 @@ class NodeLinter(linter.Linter):
         """Recursively check for command binary in ancestors' node_modules/.bin directories."""
         node_modules_bin = os.path.normpath(os.path.join(cwd, 'node_modules/.bin/'))
 
-        binary = os.path.join(node_modules_bin, cmd)
-
-        if sublime.platform() == 'windows' and os.path.splitext(binary)[1] != '.cmd':
-            binary += '.cmd'
-
-        if util.can_exec(binary):
+        binary = shutil.which(cmd, path=node_modules_bin)
+        if binary:
             return binary
 
         parent = os.path.dirname(cwd)
@@ -168,8 +156,3 @@ class NodeLinter(linter.Linter):
         """Calculate the hash of the manifest file."""
         f = codecs.open(self.manifest_path, 'r', 'utf-8')
         return hashlib.sha1(f.read().encode('utf-8')).hexdigest()
-
-    @classmethod
-    def can_lint(cls):
-        """Assume the linter can lint."""
-        return True

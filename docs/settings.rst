@@ -18,16 +18,34 @@ Settings are merged in the following order:
 
 #. Default settings
 #. User settings
-#. Project settings
+#. :ref:`Project settings <project>` (only "linters" settings)
 
+
+Styles (colors)
+---------------
+Colors are applied to highlights and gutter icons using **scopes**.
+
+Scopes are how Sublime Text manages color.
+Regions of code (and sections of the gutter) are labelled with scopes.
+You can think of scopes as class names in an HTML file.
+These scopes then receive color from the color scheme, which is kinda like a CSS stylesheet.
+
+SublimeLinter expects the scopes ``markup.warning`` and ``markup.error`` to get
+correct colors from most color schemes.
+We use scopes like ``region.redish`` for color schemes that don't provide colors for these scopes.
+
+To change the colors, you can use region.colorish scopes:
+redish, orangish, yellowish, greenish, bluish, purplish, pinkish
+
+Or you can `customize your color scheme <https://www.sublimetext.com/docs/3/color_schemes.html#customization>`_.
+
+
+.. _project:
 
 Project settings
 ----------------
 Only the "linters" settings in can be changed in a project.
 All other settings can only be changed in your user settings.
-
-SublimeLinter project settings are defined by a ``"SublimeLinter"`` object
-within Sublime Text’s sublime-project file.
 
 .. note::
 
@@ -45,21 +63,11 @@ Here is an example project settings file where the flake8 linter has been disabl
                 "path": "."
             }
         ],
-        "SublimeLinter":
+        "settings":
         {
-            "linters":
-            {
-                "flake8": {
-                    "disable": true
-                }
-            }
+            "SublimeLinter.linters.flake8.disable": true
         }
     }
-
-.. note::
-
-    Do not put the ``"SublimeLinter"`` object inside a ``"settings"`` object,
-    or anywhere else but directly in the root object of the sublime-project file.
 
 
 .. _settings-expansion:
