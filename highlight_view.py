@@ -29,10 +29,11 @@ UNDERLINE_STYLES = (
     'solid_underline', 'squiggly_underline', 'stippled_underline'
 )
 
-SOME_WS = re.compile('\s')
+SOME_WS = re.compile(r'\s')
 FALLBACK_MARK_STYLE = 'outline'
 
-WS_REGIONS = re.compile('(^\s+$|\n)')
+WS_ONLY = re.compile(r'^\s+$')
+MULTILINES = re.compile('\n')
 DEMOTE_WHILE_BUSY_MARKER = '%DWB%'
 HIDDEN_STYLE_MARKER = '%HIDDEN%'
 
@@ -51,6 +52,7 @@ def get_regions_keys(view):
 
 State = {
     'active_view': None,
+    'current_sel': tuple(),
     'idle_views': set(),
     'quiet_views': set()
 }
@@ -166,8 +168,14 @@ def get_demote_predicate():
     if setting == 'all':
         return demote_all
 
-    if setting == 'ws_regions':
-        return demote_ws_regions
+    if setting == 'ws_only':
+        return demote_ws_only
+
+    if setting in ('some_ws', 'ws_regions'):  # 'ws_regions' is deprecated
+        return demote_some_ws
+
+    if setting == 'multilines':
+        return demote_multilines
 
     if setting == 'warnings':
         return demote_warnings
@@ -185,8 +193,16 @@ def demote_all(*args, **kwargs):
     return True
 
 
-def demote_ws_regions(selected_text, **kwargs):
-    return bool(WS_REGIONS.search(selected_text))
+def demote_ws_only(selected_text, **kwargs):
+    return bool(WS_ONLY.search(selected_text))
+
+
+def demote_some_ws(selected_text, **kwargs):
+    return bool(SOME_WS.search(selected_text))
+
+
+def demote_multilines(selected_text, **kwargs):
+    return bool(MULTILINES.search(selected_text))
 
 
 def demote_warnings(selected_text, error_type, **kwargs):
@@ -196,7 +212,10 @@ def demote_warnings(selected_text, error_type, **kwargs):
 class IdleViewController(sublime_plugin.EventListener):
     def on_activated_async(self, active_view):
         previous_view = State['active_view']
-        State.update({'active_view': active_view})
+        State.update({
+            'active_view': active_view,
+            'current_sel': get_current_sel(active_view)
+        })
 
         if previous_view and previous_view.id() != active_view.id():
             set_idle(previous_view, True)
@@ -215,19 +234,29 @@ class IdleViewController(sublime_plugin.EventListener):
         if view.buffer_id() == active_view.buffer_id():
             set_idle(active_view, True)
 
-    @util.distinct_until_selection_changed
     def on_selection_modified_async(self, view):
         active_view = State['active_view']
         # Do not race between `plugin_loaded` and this event handler
         if active_view is None:
             return
 
-        time_to_idle = persist.settings.get('highlights.time_to_idle')
-        if view.buffer_id() == active_view.buffer_id():
+        if view.buffer_id() != active_view.buffer_id():
+            return
+
+        current_sel = get_current_sel(active_view)
+        if current_sel != State['current_sel']:
+            State.update({'current_sel': current_sel})
+
+            time_to_idle = persist.settings.get('highlights.time_to_idle')
             queue.debounce(
                 partial(set_idle, active_view, True),
                 delay=time_to_idle,
-                key='highlights.{}'.format(view.id()))
+                key='highlights.{}'.format(active_view.id())
+            )
+
+
+def get_current_sel(view):
+    return tuple(s for s in view.sel())
 
 
 def set_idle(view, idle):

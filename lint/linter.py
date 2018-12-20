@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 ARG_RE = re.compile(r'(?P<prefix>@|--?)?(?P<name>[@\w][\w\-]*)(?:(?P<joiner>[=:])?(?:(?P<sep>.)(?P<multiple>\+)?)?)?')
-NEAR_RE_TEMPLATE = r'(?<!"){}({}){}(?!")'
 BASE_CLASSES = ('PythonLinter', 'RubyLinter', 'NodeLinter', 'ComposerLinter')
 
 # Many linters use stdin, and we convert text to utf-8
@@ -94,6 +93,9 @@ class VirtualView:
         """Return code for the given line."""
         start, end = self.full_line(line)
         return self._code[start:end]
+
+    def max_lines(self):
+        return len(self._newlines) - 2
 
     # Actual Sublime API would look like:
     # def full_line(self, region)
@@ -660,7 +662,9 @@ class Linter(metaclass=LinterMeta):
                 path = self.which(which)
 
             if not path:
-                logger.warning('{} cannot locate \'{}\''.format(self.name, which))
+                logger.warning('{} cannot locate \'{}\'\n'
+                               'Please refer to the readme of this plugin and our troubleshooting guide: '
+                               'http://www.sublimelinter.com/en/stable/troubleshooting.html'.format(self.name, which))
                 return None
 
         cmd[0:1] = util.convert_type(path, [])
@@ -748,7 +752,7 @@ class Linter(metaclass=LinterMeta):
                 continue
 
             values = settings.get(setting, None)
-            if not values and not values == 0:
+            if not values and type(values) is not int:  # Allow `0`!
                 continue
 
             arg = prefix + arg_info['name']
@@ -883,8 +887,8 @@ class Linter(metaclass=LinterMeta):
         settings = self.get_view_settings()
         lint_mode = settings.get('lint_mode', fallback_mode)
         logger.info(
-            'Checking lint mode {} vs lint reason {}'
-            .format(lint_mode, reason)
+            "{}: checking lint mode '{}' vs lint reason '{}'"
+            .format(self.name, lint_mode, reason)
         )
 
         return reason in _ACCEPTABLE_REASONS_MAP[lint_mode]
@@ -899,12 +903,9 @@ class Linter(metaclass=LinterMeta):
         - If the view has been modified in between, stop.
         - Parse the linter output with the regex.
         """
-        canonical_filename = (
-            os.path.basename(self.view.file_name()) if self.view.file_name()
-            else '<untitled {}>'.format(self.view.buffer_id()))
         logger.info(
-            "'{}' is linting '{}'"
-            .format(self.name, canonical_filename))
+            "{}: linting '{}'"
+            .format(self.name, util.canonical_filename(self.view)))
 
         # `cmd = None` is a special API signal, that the plugin author
         # implemented its own `run`
@@ -922,7 +923,37 @@ class Linter(metaclass=LinterMeta):
             raise TransientError('View not consistent.')
 
         virtual_view = VirtualView(code)
-        return self.parse_output(output, virtual_view)
+        return self.filter_errors(self.parse_output(output, virtual_view))
+
+    def filter_errors(self, errors):
+        filter_patterns = self.get_view_settings().get('filter_errors') or []
+        if isinstance(filter_patterns, str):
+            filter_patterns = [filter_patterns]
+
+        filters = []
+        try:
+            for pattern in filter_patterns:
+                try:
+                    filters.append(re.compile(pattern, re.I))
+                except re.error as err:
+                    logger.error(
+                        "'{}' in 'filter_errors' is not a valid "
+                        "regex pattern: '{}'.".format(pattern, err)
+                    )
+
+        except TypeError:
+            logger.error(
+                "'filter_errors' must be set to a string or a list of strings.\n"
+                "Got '{}' instead".format(filter_patterns))
+
+        return [
+            error
+            for error in errors
+            if not any(
+                pattern.search(': '.join([error['error_type'], error['code'], error['msg']]))
+                for pattern in filters
+            )
+        ]
 
     def parse_output(self, proc, virtual_view):
         # Note: We support type str for `proc`. E.g. the user might have
@@ -947,14 +978,14 @@ class Linter(metaclass=LinterMeta):
 
     def parse_output_via_regex(self, output, virtual_view):
         if not output:
-            return []
+            logger.info('{}: no output'.format(self.name))
+            return
 
         if logger.isEnabledFor(logging.INFO):
             import textwrap
-            logger.info('{} output:\n{}'.format(
-                self.name, textwrap.indent(output.strip(), 4 * ' ')))
+            logger.info('{}: output:\n{}'.format(
+                self.name, textwrap.indent(output.strip(), '  ')))
 
-        errors = []
         for m in self.find_errors(output):
             if not m or not m[0]:
                 continue
@@ -963,10 +994,7 @@ class Linter(metaclass=LinterMeta):
                 m = LintMatch(*m)
 
             if m.message and m.line is not None:
-                error = self.process_match(m, virtual_view)
-                errors.append(error)
-
-        return errors
+                yield self.process_match(m, virtual_view)
 
     def find_errors(self, output):
         """
@@ -1039,15 +1067,26 @@ class Linter(metaclass=LinterMeta):
         error_type = self.get_error_type(m.error, m.warning)
 
         col = m.col
+        line = m.line
+
+        # Ensure `line` is within bounds
+        line = max(min(line, vv.max_lines()), 0)
+        if line != m.line:
+            logger.warning(
+                "Reported line '{}' is not within the code we're linting.\n"
+                "Maybe the linter reports problems from multiple files "
+                "or `line_col_base` is not set correctly."
+                .format(m.line + self.line_col_base[0])
+            )
 
         if col is not None:
-            col = self.maybe_fix_tab_width(m.line, col, vv)
+            col = self.maybe_fix_tab_width(line, col, vv)
 
             # Pin the column to the start/end line offsets
-            start, end = vv.full_line(m.line)
+            start, end = vv.full_line(line)
             col = max(min(col, (end - start) - 1), 0)
 
-        line, start, end = self.reposition_match(m.line, col, m, vv)
+        line, start, end = self.reposition_match(line, col, m, vv)
         return {
             "line": line,
             "start": start,
@@ -1082,19 +1121,22 @@ class Linter(metaclass=LinterMeta):
         beginning at the `col`. If `m.near` is given, it selects the first
         occurrence of that word on the give `line`.
         """
+        near = self.strip_quotes(m.near) if m.near is not None else m.near
         if col is None:
-            if m.near:
-                text = vv.select_line(m.line)
-                near = self.strip_quotes(m.near)
+            # Empty strings won't match anything anyway so we do the simple
+            # falsy test
+            if near:
+                text = vv.select_line(line)
 
-                # Add \b fences around the text if it begins/ends with a word character
+                # Add \b fences around the text if it begins/ends with a word
+                # character
                 fence = ['', '']
 
                 for i, pos in enumerate((0, -1)):
                     if near[pos].isalnum() or near[pos] == '_':
                         fence[i] = r'\b'
 
-                pattern = NEAR_RE_TEMPLATE.format(fence[0], re.escape(near), fence[1])
+                pattern = '{}({}){}'.format(fence[0], re.escape(near), fence[1])
                 match = re.search(pattern, text)
 
                 if match:
@@ -1107,19 +1149,19 @@ class Linter(metaclass=LinterMeta):
                 persist.settings.get('no_column_highlights_line') or
                 not persist.settings.has('gutter_theme')
             ):
-                start, end = vv.full_line(m.line)
-                length = end - start - 1  # -1 for the trailing '\n'
-                return line, 0, length
+                # `rstrip` bc underlining the trailing '\n' looks ugly
+                text = vv.select_line(line).rstrip()
+                return line, 0, len(text)
             else:
                 return line, 0, 0
 
         else:
-            if m.near:
-                near = self.strip_quotes(m.near)
+            # Strict 'None' test bc empty strings should be handled here
+            if near is not None:
                 length = len(near)
                 return line, col, col + length
             else:
-                text = vv.select_line(m.line)[col:]
+                text = vv.select_line(line)[col:]
                 match = self.word_re.search(text) if self.word_re else None
 
                 length = len(match.group()) if match else 1
@@ -1128,7 +1170,7 @@ class Linter(metaclass=LinterMeta):
     @staticmethod
     def strip_quotes(text):
         """Return text stripped of enclosing single/double quotes."""
-        if len(text) < 3:
+        if len(text) < 2:
             return text
 
         first = text[0]

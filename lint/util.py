@@ -59,21 +59,11 @@ def distinct_until_buffer_changed(method):
     return wrapper
 
 
-def distinct_until_selection_changed(method):
-    last_call = None
-
-    @wraps(method)
-    def wrapper(self, view):
-        nonlocal last_call
-
-        this_call = (view.buffer_id(),) + tuple(s for s in view.sel())
-        if this_call == last_call:
-            return
-
-        last_call = this_call
-        method(self, view)
-
-    return wrapper
+def canonical_filename(view):
+    return (
+        os.path.basename(view.file_name()) if view.file_name()
+        else '<untitled {}>'.format(view.buffer_id())
+    )
 
 
 def get_syntax(view):
@@ -220,7 +210,7 @@ def check_output(cmd, cwd=None):
         logger.warning(
             "Executing `{}` failed\n  {}".format(' '.join(cmd), str(err))
         )
-        return ''
+        raise
     else:
         return process_popen_output(output)
 

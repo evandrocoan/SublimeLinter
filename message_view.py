@@ -15,17 +15,24 @@ class SublimeLinterDisplayPanelCommand(sublime_plugin.WindowCommand):
         window = self.window
 
         if is_panel_active(window):
-            panel_view = window.find_output_panel(PANEL_NAME)
+            panel = window.find_output_panel(PANEL_NAME)
         else:
-            panel_view = window.create_output_panel(PANEL_NAME)
+            panel = window.create_output_panel(PANEL_NAME)
+            syntax_path = "Packages/SublimeLinter/panel/message_view.sublime-syntax"
+            try:  # Try the resource first, in case we're in the middle of an upgrade
+                sublime.load_resource(syntax_path)
+            except Exception:
+                return
 
-        scroll_to = panel_view.size()
+            panel.assign_syntax(syntax_path)
+
+        scroll_to = panel.size()
         msg = msg.rstrip() + '\n\n\n'
 
-        panel_view.set_read_only(False)
-        panel_view.run_command('append', {'characters': msg})
-        panel_view.set_read_only(True)
-        panel_view.show(scroll_to)
+        panel.set_read_only(False)
+        panel.run_command('append', {'characters': msg})
+        panel.set_read_only(True)
+        panel.show(scroll_to)
         window.run_command("show_panel", {"panel": OUTPUT_PANEL})
 
 
